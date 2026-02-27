@@ -4,20 +4,17 @@
 
 # astrbot_plugin_endfield
 
-基于森空岛 API 的 AstrBot **终末地** 插件 · 绑定 / 便签 / 干员面板 / 抽卡分析 / 签到
+基于[森空岛 API](https://skland.com) 及 [终末地协议终端](https://end.shallow.ink)  的 AstrBot **终末地** 插件 · 绑定 / 便签 / 干员面板 / 抽卡分析 / 签到
 
 </div>
-
-基于 [森空岛 API](https://skland.com) 及 [终末地协议终端](https://end.shallow.ink) 的 AstrBot 插件，提供详尽的玩家数据查询、理智展示、干员面板及抽卡分析功能。
-
-## 注：本插件开发中，部分功能不可用（readme中列出的指令可用），本次提交仅占坑
+## 注：本插件开发中，部分功能不可用（readme中列出的指令可用），仅展示功能和绑定功能可用
 
 ## 安装与配置
 
 1. 在 AstrBot 插件管理器中搜索 `astrbot_plugin_endfield` 并安装。
 2. 确保在系统环境中已安装并正确配置浏览器依赖以供 Playwright 渲染：`playwright install chromium`
 3. 插件配置项（按需设置）：
-   - `api_key`：请前往 [浅墨服务构建](https://end.shallow.ink) 获取。
+   - `api_key`：请前往 [协议终端](https://end.shallow.ink) 获取。
    - `auth_client_name`：网页授权登录时的显示名称（默认：`终末地机器人`）
    - `operator_list_bg`：干员列表背景图选择（`random`, `bg1.png`, `bg2.png`）
    - `render_timeout`：单次图片渲染的全局超时限制（毫秒）。
@@ -46,7 +43,7 @@
 | 指令前缀：`/` (或自定义) | 说明 |
 |------|------|
 | **基础功能** | |
-| `帮助` 或 `zmd` | 打开帮助菜单 |
+|  `zmd` | 打开帮助菜单 |
 | **账号与绑定** | |
 | `授权登陆` | 通过森空岛网页进行安全授权登录 |
 | `扫码绑定` | 扫描二维码快捷登录 |
@@ -75,7 +72,7 @@
 
 <img width="1083" height="1120" alt="image" src="https://github.com/user-attachments/assets/3355b411-215a-4bf9-b536-e67804e8d122" />
 
-| `抽卡分析（部分）`| 
+| `抽卡分析`| 
 
 <img width="506" height="891" alt="image" src="https://github.com/user-attachments/assets/5e86a76b-0d06-4f7b-97fc-6b914f57efb3" />
 <img width="176" height="841" alt="image" src="https://github.com/user-attachments/assets/17d09d14-ad26-4499-8201-ddbcc72acda6" />
@@ -168,5 +165,6 @@
 
 > [!TIP]
 > astrbot移植作者bvzrays插件反馈，加入 [870543663](https://qm.qq.com/q/kPxQZy5gg8) 。
+
 
 
