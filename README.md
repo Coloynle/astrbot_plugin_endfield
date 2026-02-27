@@ -54,16 +54,25 @@
 | `签到` | 执行所有账号的森空岛每日签到 |
 
 ## 功能截图
+
 | `便签`| 
 <img width="1700" height="1338" alt="a73ce8015048c7d0c7b6d67755120711" src="https://github.com/user-attachments/assets/d9c07469-f00d-42c2-820a-f46402adf714" />
+
 | `理智`| 
+
 <img width="1280" height="482" alt="4be3e81d3f4eb0ab686c2787b8ee9f70_720" src="https://github.com/user-attachments/assets/0a723c50-d81d-444f-932e-32918a0ee2ed" />
+
 | `干员列表`| 
+
 <img width="1083" height="1120" alt="image" src="https://github.com/user-attachments/assets/3355b411-215a-4bf9-b536-e67804e8d122" />
+
 | `抽卡分析（部分）`| 
+
 <img width="506" height="891" alt="image" src="https://github.com/user-attachments/assets/5e86a76b-0d06-4f7b-97fc-6b914f57efb3" />
 <img width="176" height="841" alt="image" src="https://github.com/user-attachments/assets/17d09d14-ad26-4499-8201-ddbcc72acda6" />
+
 | `抽卡记录`| 
+
 <img width="1440" height="1134" alt="87eb6ffe8ce92a37525f574c5fedcd87" src="https://github.com/user-attachments/assets/aacab909-6a04-467a-aeaf-a525558e1ddb" />
 
 ---
