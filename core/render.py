@@ -15,225 +15,120 @@ class Renderer:
         return ""
 
     async def render_html(self, template_name: str, data: Dict[str, Any], options: Optional[Dict] = None) -> Optional[str]:
-        # Adapt Yunzai template to AstrBot
-        # Yunzai uses a custom template engine, AstrBot uses Jinja2.
-        # We need to minimally adapt the template content if it uses {{if}} {{each}} etc.
-        # For now, let's assume we can do some simple regex replacements or just provide the data.
-        
-        import jinja2
-        # Initialize Jinja2 environment explicitly instead of relying on external renderer
-        # to ensure local Playwright gets fully rendered HTML text
-        self.jinja_env = jinja2.Environment()
-        
+        """Entry point for rendering HTML templates to images using Playwright."""
         tmpl_content = self.get_template(template_name)
         if not tmpl_content:
             return None
             
-        # Basic conversion from Yunzai template (art-template) to Jinja2
-        # {{if condition}} -> {% if condition %}
-        # {{each list item idx}} -> {% for item in list %}
-        # {{/if}} -> {% endif %}
-        # {{/each}} -> {% endfor %}
-        
+        adapted = self._adapt_template(tmpl_content)
+        adapted = self._inline_assets(adapted)
+        html_content = self._render_jinja(adapted, data)
+        if not html_content:
+            return None
+            
+        return await self._screenshot(html_content, template_name, options)
+
+    def _adapt_template(self, content: str) -> str:
+        """Converts Yunzai (art-template) syntax to Jinja2."""
         import re
-        
-        # Globally replace $value with item since Yunzai art-template defaults to $value
-        adapted = tmpl_content.replace("$value", "item")
+        adapted = content.replace("$value", "item")
         
         def fix_condition(match):
-            cond = match.group(1)
-            # Replace common JS operators to Python/Jinja operators
-            cond = cond.replace("===", "==").replace("!==", "!=")
-            cond = cond.replace("&&", "and").replace("||", "or")
-            cond = cond.replace("null", "none")
+            cond = match.group(1).replace("===", "==").replace("!==", "!=").replace("&&", "and").replace("||", "or").replace("null", "none").replace(".length", "|length")
             cond = re.sub(r'!\s*([\w\.]+)', r'not \1', cond)
-            cond = cond.replace(".length", "|length")
             return f"{{% if {cond} %}}"
             
         adapted = re.sub(r'\{\{if\s+(.+?)\}\}', fix_condition, adapted)
-        adapted = adapted.replace("{{/if}}", "{% endif %}")
-        adapted = adapted.replace("{{else}}", "{% else %}")
-        
-        def fix_elif(match):
-            cond = match.group(1)
-            cond = cond.replace("===", "==").replace("!==", "!=")
-            cond = cond.replace("&&", "and").replace("||", "or")
-            cond = cond.replace("null", "none")
-            cond = re.sub(r'!\s*([\w\.]+)', r'not \1', cond)
-            cond = cond.replace(".length", "|length")
-            return f"{{% elif {cond} %}}"
-        adapted = re.sub(r'\{\{else if\s+(.+?)\}\}', fix_elif, adapted)
-        
-        # Replace {{@var}} with {{var|safe}}
-        import re
+        adapted = adapted.replace("{{/if}}", "{% endif %}").replace("{{else}}", "{% else %}")
+        adapted = re.sub(r'\{\{else if\s+(.+?)\}\}', lambda m: fix_condition(m).replace("if", "elif"), adapted)
         adapted = re.sub(r'\{\{@\s*([\w\.]+)\s*\}\}', r'{{\1|safe}}', adapted)
+        adapted = re.sub(r'\{\{([^%\}]+?)\}\}', lambda m: f"{{{{{m.group(1).replace('||', 'or').replace('&&', 'and').replace('null', 'none')}}}}}", adapted)
         
-        # Replace JS operators inside print tags {{ ... }}
-        def fix_print(match):
-            content = match.group(1)
-            content = content.replace("||", "or").replace("&&", "and").replace("null", "none")
-            return f"{{{{{content}}}}}"
-        adapted = re.sub(r'\{\{([^%\}]+?)\}\}', fix_print, adapted)
-        
-        # Replace {{each list item idx}} with {% for item in list %}
-        # Also handle {{each list item}}
         def replace_each(match):
             inner = match.group(1).strip().split()
-            # inner[0] is the list (can have dots), inner[1] is the item var, inner[2] (optional) is index var
             if len(inner) >= 2:
-                # We ignore the index variable for now in simplistic Jinja2 translation
-                list_var = inner[0]
-                item_var = inner[1]
-                return f"{{% for {item_var} in {list_var} %}}"
-            return "{% for item in " + inner[0] + " %}" # Fallback
+                return f"{{% for {inner[1]} in {inner[0]} %}}"
+            return f"{{% for item in {inner[0]} %}}"
             
         adapted = re.sub(r'\{\{\s*each\s+(.+?)\s*\}\}', replace_each, adapted)
-        adapted = adapted.replace("{{/each}}", "{% endfor %}")
+        return adapted.replace("{{/each}}", "{% endfor %}")
+
+    def _inline_assets(self, html: str) -> str:
+        """Inlines CSS and Images to ensure Playwright renders them correctly."""
+        import re, base64, mimetypes
         
-        # Inline CSS: replace <link rel="stylesheet" href="{{_res_path}}xxx.css"> with <style>...</style>
         def inline_css(match):
-            css_rel_path = match.group(1)
-            css_full_path = os.path.join(self.res_path, css_rel_path)
-            if os.path.exists(css_full_path):
-                with open(css_full_path, "r", encoding="utf-8") as f:
+            path = os.path.join(self.res_path, match.group(1))
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
                     return f"<style>\n{f.read()}\n</style>"
             return ""
-        
-        # Match {{_res_path}}path/to.css and {{pluResPath}}path/to.css
-        adapted = re.sub(r'<link\s+rel="stylesheet"\s+href="\{\{(?:_res_path|pluResPath)\}\}([^"]+\.css)">', inline_css, adapted)
-        
-        # Inline images: replace src="{{_res_path}}img.png" with base64
-        import base64
-        import mimetypes
-        
+            
         def inline_image(match):
-            img_rel_path = match.group(1)
-            img_full_path = os.path.join(self.res_path, img_rel_path)
-            if os.path.exists(img_full_path):
-                mime, _ = mimetypes.guess_type(img_full_path)
-                mime = mime or "image/png"
-                with open(img_full_path, "rb") as f:
+            path = os.path.join(self.res_path, match.group(1))
+            if os.path.exists(path):
+                mime = mimetypes.guess_type(path)[0] or "image/png"
+                with open(path, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode("utf-8")
-                    return f'src="data:{mime};base64,{b64}"'
-            return match.group(0) # Keep original if not found
-            
-        adapted = re.sub(r'src="\{\{(?:_res_path|pluResPath)\}\}([^"]+\.(?:png|jpg|jpeg|gif|svg|webp))"', inline_image, adapted)
-        
-        # Also fix up any remaining {{pluResPath}} or {{_res_path}} in inline styles
-        def inline_style_bg(match):
-            img_rel_path = match.group(1)
-            img_full_path = os.path.join(self.res_path, img_rel_path)
-            if os.path.exists(img_full_path):
-                mime, _ = mimetypes.guess_type(img_full_path)
-                mime = mime or "image/png"
-                with open(img_full_path, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("utf-8")
-                    return f'url(data:{mime};base64,{b64})'
+                    return f'src="data:{mime};base64,{b64}"' if match.group(0).startswith('src') else f'url(data:{mime};base64,{b64})'
             return match.group(0)
-            
-        adapted = re.sub(r'url\(\s*[\'"]?\{\{(?:_res_path|pluResPath)\}\}([^)"]+?)[\'"]?\s*\)', inline_style_bg, adapted)
-        
-        # Clean up stray jinja formatting and set correct absolute file paths
-        data["_res_path"] = "X"
-        data["pluResPath"] = "X"
-        
-        # Render the HTML locally
+
+        html = re.sub(r'<link\s+rel="stylesheet"\s+href="\{\{(?:_res_path|pluResPath)\}\}([^"]+\.css)">', inline_css, html)
+        html = re.sub(r'src="\{\{(?:_res_path|pluResPath)\}\}([^"]+\.(?:png|jpg|jpeg|gif|svg|webp))"', inline_image, html)
+        html = re.sub(r'url\(\s*[\'"]?\{\{(?:_res_path|pluResPath)\}\}([^)"]+?)[\'"]?\s*\)', inline_image, html)
+        return html
+
+    def _render_jinja(self, template_str: str, data: Dict[str, Any]) -> Optional[str]:
+        """Renders the adapted template with data using Jinja2."""
+        import jinja2
         try:
-            template = self.jinja_env.from_string(adapted)
-            html_content = template.render(**data)
+            env = jinja2.Environment(autoescape=True)
+            data["_res_path"] = data["pluResPath"] = "X"
+            return env.from_string(template_str).render(**data)
         except Exception as e:
             from astrbot.api import logger
-            logger.error(f"Template parsing failed: {e}")
-            logger.error(f"Adapted template:\n{adapted}")
-            with open("error3.log", "w", encoding="utf-8") as f:
-                f.write(str(e))
+            logger.error(f"[Endfield Render] Jinja2 error: {e}")
             return None
-            
-        # Use local Playwright rendering (like astrbot_plugin_html_render does)
-        # Bypasses the remote T2I engine limits completely
-        import uuid
+
+    async def _screenshot(self, html: str, name: str, options: Optional[Dict]) -> Optional[str]:
+        """Uses Playwright to capture a screenshot of the rendered HTML."""
         from playwright.async_api import async_playwright
+        import uuid, time
         
-        output_filename = f"endfield_render_{uuid.uuid4().hex[:8]}.png"
+        output_dir = os.path.abspath(os.path.join(self.res_path, "..", "render_cache"))
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"render_{uuid.uuid4().hex[:8]}.png")
         
-        # Construct path inside the plugin directory
-        # Self.plugin.context will have the base path or we just use res_path's parent
-        plugin_dir = os.path.abspath(os.path.join(self.res_path, ".."))
-        cache_dir = os.path.join(plugin_dir, "render_cache")
-        if not os.path.exists(cache_dir):
-            os.makedirs(cache_dir, exist_ok=True)
-        else:
-            import time
-            now_ts = time.time()
-            for f in os.listdir(cache_dir):
-                if f.startswith("endfield_render_") and f.endswith(".png"):
-                    ft = os.path.join(cache_dir, f)
-                    if os.path.isfile(ft) and now_ts - os.path.getmtime(ft) > 120:
-                        try:
-                            os.remove(ft)
-                        except Exception:
-                            pass
-            
-        output_path = os.path.join(cache_dir, output_filename)
-        
+        for f in os.listdir(output_dir):
+            if f.startswith("render_") and time.time() - os.path.getmtime(os.path.join(output_dir, f)) > 300:
+                try: os.remove(os.path.join(output_dir, f))
+                except: pass
+
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch()
-                context = await browser.new_context(
-                    device_scale_factor=2,
-                    viewport={"width": 850, "height": 800}
-                )
+                context = await browser.new_context(device_scale_factor=2, viewport={"width": 850, "height": 800})
                 page = await context.new_page()
                 
-                temp_html_filename = f"render_{uuid.uuid4().hex[:8]}.html"
-                template_dir = os.path.dirname(os.path.abspath(os.path.join(self.res_path, template_name)))
-                temp_html_path = os.path.join(template_dir, temp_html_filename)
+                temp_html = os.path.join(os.path.dirname(os.path.abspath(os.path.join(self.res_path, name))), f"tmp_{uuid.uuid4().hex[:8]}.html")
+                with open(temp_html, "w", encoding="utf-8") as f: f.write(html)
                 
-                with open(temp_html_path, "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                    
                 try:
-                    try:
-                        await page.goto(f"file:///{temp_html_path.replace(chr(92), '/')}", wait_until="load", timeout=30000)
-                    except Exception as e:
-                        try:
-                            from astrbot.api import logger
-                            logger.warning(f"Playwright navigation non-fatal timeout: {e}")
-                        except:
-                            pass
-                            
+                    await page.goto(f"file:///{temp_html.replace(chr(92), '/')}", wait_until="load", timeout=15000)
                     await page.wait_for_timeout(100)
-                    
-                    # Get exact bounding box of the first element to crop out white space
                     el = await page.evaluate_handle("document.body.firstElementChild")
                     box = await el.bounding_box() if el else None
                     if box:
                         await page.set_viewport_size({"width": int(box["width"]) + 2, "height": int(box["height"]) + 2})
                         await page.screenshot(path=output_path, clip=box)
                     else:
-                        content_h = await page.evaluate("document.body.scrollHeight")
-                        content_w = await page.evaluate("document.body.scrollWidth")
-                        await page.set_viewport_size({"width": content_w, "height": max(content_h, 200)})
                         await page.screenshot(path=output_path, full_page=True)
-                        
                     if el: await el.dispose()
                 finally:
-                    if os.path.exists(temp_html_path):
-                        try:
-                            os.remove(temp_html_path)
-                        except Exception:
-                            pass
-                            
+                    if os.path.exists(temp_html): os.remove(temp_html)
                 await browser.close()
-                
             return output_path
-            
-        except ImportError:
-            # Fallback if playwright is unexpectedly missing
-            return await self.plugin.html_render(adapted, data, options=options)
         except Exception as e:
             from astrbot.api import logger
-            logger.error(f"Playwright rendering failed: {e}")
-            with open(os.path.join(cache_dir, "error2.log"), "w", encoding="utf-8") as f:
-                f.write(str(e))
+            logger.error(f"[Endfield Render] Playwright error: {e}")
             return None

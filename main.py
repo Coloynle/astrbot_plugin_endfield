@@ -20,9 +20,11 @@ class EndfieldPlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self.api_key = config.get("api_key", "") if config else ""
-        self.client = EndfieldClient(self.api_key)
+        self.verify_ssl = config.get("verify_ssl", True) if config else True
+        self.client = EndfieldClient(self.api_key, verify_ssl=self.verify_ssl)
         
-        data_dir = os.path.join(os.path.dirname(__file__), "data")
+        # Use StarTools.get_data_dir() for persistence compliance
+        data_dir = StarTools.get_data_dir()
         if not os.path.exists(data_dir):
             os.makedirs(data_dir, exist_ok=True)
             
@@ -33,6 +35,8 @@ class EndfieldPlugin(Star):
         
         res_path = os.path.join(os.path.dirname(__file__), "resources")
         self.renderer = Renderer(res_path, self)
+        self._announcement_task_handle = None
+        self._http_client = None
 
     async def get_b64(self, rp):
         import mimetypes, base64, httpx, hashlib, asyncio
@@ -60,19 +64,22 @@ class EndfieldPlugin(Star):
                 return "file:///" + os.path.abspath(cache_file).replace("\\", "/")
                     
             try:
-                # Asynchronous retry logic for unstable connections
-                async with httpx.AsyncClient(verify=False) as client:
-                    for attempt in range(3):
-                        try:
-                            resp = await client.get(rp, timeout=10)
-                            if resp.status_code == 200:
-                                with open(cache_file, "wb") as f:
-                                    f.write(resp.content)
-                                return "file:///" + os.path.abspath(cache_file).replace("\\", "/")
-                            break
-                        except Exception:
-                            if attempt == 2: raise
-                            await asyncio.sleep(0.5)
+                # Use persistent client session if possible
+                if self._http_client is None or self._http_client.is_closed:
+                    self._http_client = httpx.AsyncClient(verify=self.verify_ssl)
+                
+                client = self._http_client
+                for attempt in range(3):
+                    try:
+                        resp = await client.get(rp, timeout=10)
+                        if resp.status_code == 200:
+                            with open(cache_file, "wb") as f:
+                                f.write(resp.content)
+                            return "file:///" + os.path.abspath(cache_file).replace("\\", "/")
+                        break
+                    except Exception:
+                        if attempt == 2: raise
+                        await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"Failed to fetch external image {rp}: {e}")
             return rp
@@ -90,7 +97,7 @@ class EndfieldPlugin(Star):
 
     async def initialize(self):
         # Announcement Task
-        asyncio.create_task(self.announcement_task())
+        self._announcement_task_handle = asyncio.create_task(self.announcement_task())
 
     @filter.command("zmd")
     async def zmd_help(self, event: AstrMessageEvent):
@@ -216,7 +223,7 @@ class EndfieldPlugin(Star):
         for i, b in enumerate(bindings):
             b["is_primary"] = (i + 1 == index)
             
-        self.user_mgr.save_user_bindings(user_id, bindings)
+        await self.user_mgr.save_user_bindings(user_id, bindings)
         yield event.plain_result(f"已切换至账号：{bindings[index-1]['nickname']}")
         async for res in self.bind_list(event):
             yield res
@@ -233,7 +240,7 @@ class EndfieldPlugin(Star):
         target = bindings[index-1]
         confirm = await self.client.delete_binding(target["binding_id"], user_id)
         
-        self.user_mgr.delete_user_binding(user_id, target["binding_id"])
+        await self.user_mgr.delete_user_binding(user_id, target["binding_id"])
         
         msg = f"已删除绑定：{target['nickname']}"
         if not confirm:
@@ -311,12 +318,12 @@ class EndfieldPlugin(Star):
             "is_active": True,
             "is_primary": True,
             "login_type": "auth",
-            "bind_time": int(asyncio.get_event_loop().time() * 1000) # Simple TS
+            "bind_time": int(time.time() * 1000) # Simple TS
         }
         
         existing = self.user_mgr.get_user_bindings(user_id)
         existing.append(new_account)
-        self.user_mgr.save_user_bindings(user_id, existing)
+        await self.user_mgr.save_user_bindings(user_id, existing)
         
         yield event.plain_result(get_message("enduid.login_ok", {
             "nickname": new_account["nickname"],
@@ -390,11 +397,11 @@ class EndfieldPlugin(Star):
             "login_type": "qr",
             "is_active": True,
             "is_primary": True,
-            "bind_time": int(asyncio.get_event_loop().time() * 1000)
+            "bind_time": int(time.time() * 1000)
         }
         existing = self.user_mgr.get_user_bindings(user_id)
         existing.append(acc)
-        self.user_mgr.save_user_bindings(user_id, existing)
+        await self.user_mgr.save_user_bindings(user_id, existing)
         
         yield event.plain_result(get_message("enduid.login_ok", {
             "nickname": acc["nickname"],
@@ -406,7 +413,7 @@ class EndfieldPlugin(Star):
     @filter.command("手机绑定")
     async def phone_login(self, event: AstrMessageEvent, phone: str):
         '''手机号验证码登录'''
-        if not event.is_private():
+        if event.get_group_id():
             yield event.plain_result("手机号登录请在私聊中进行。")
             return
             
@@ -449,11 +456,12 @@ class EndfieldPlugin(Star):
                 "login_type": "phone",
                 "is_active": True,
                 "is_primary": True,
-                "bind_time": int(asyncio.get_event_loop().time() * 1000)
+                "bind_time": int(time.time() * 1000),
+                "last_sync": 0,
             }
             existing = self.user_mgr.get_user_bindings(event.get_sender_id())
             existing.append(acc)
-            self.user_mgr.save_user_bindings(event.get_sender_id(), existing)
+            await self.user_mgr.save_user_bindings(event.get_sender_id(), existing)
             
             await waiter_event.send(get_message("enduid.login_ok", {
                 "nickname": acc["nickname"],
@@ -579,7 +587,7 @@ class EndfieldPlugin(Star):
         
         note_data = await self.client.get_note(token, role_id, server_id)
         if not note_data or "base" not in note_data:
-            yield event.plain_result(get_message("common.get_role_failed", "获取账号失败。"))
+            yield event.plain_result(get_message("common.get_role_failed"))
             return
             
         stamina_data = await self.client.get_stamina(token, role_id, server_id)
@@ -884,7 +892,7 @@ class EndfieldPlugin(Star):
             "star4": res_stats.get("star4_count", 0),
             "userNickname": binding.get('nickname') or "未知",
             "userUid": binding.get("role_id", ""),
-            "userAvatar": self.get_b64(binding.get("avatarUrl", "")),
+            "userAvatar": await self.get_b64(binding.get("avatarUrl", "")),
             "page": page,
             "pageSize": 10,
             "poolSections": [],
@@ -1261,14 +1269,14 @@ class EndfieldPlugin(Star):
         if cmd == "单抽":
             res = await self.client.post_gacha_simulate_single(pool_type, state)
             if res and "result" in res:
-                self.sim_mgr.save_state(scope, pool_type, res.get("state"))
+                await self.sim_mgr.save_state(scope, pool_type, res.get("state"))
                 r = res["result"]
                 msg = f"【模拟单抽 - {pool_name or 'UP池'}】\n★{r.get('rarity')} {r.get('name') or ''}"
                 yield event.plain_result(msg)
         elif cmd == "十连":
             res = await self.client.post_gacha_simulate_ten(pool_type, state)
             if res and "results" in res:
-                self.sim_mgr.save_state(scope, pool_type, res.get("state"))
+                await self.sim_mgr.save_state(scope, pool_type, res.get("state"))
                 msg = f"【模拟十连 - {pool_name or 'UP池'}】\n"
                 for r in res["results"]:
                     msg += f"★{r.get('rarity')} {r.get('name') or ''}\n"
@@ -1298,24 +1306,24 @@ class EndfieldPlugin(Star):
     @filter.command("订阅公告")
     async def subscribe_announcement(self, event: AstrMessageEvent):
         '''订阅公告推送（仅限群聊）'''
-        if not event.is_group():
+        if not event.get_group_id():
              yield event.plain_result("请在群聊中使用此命令。")
              return
              
         group_id = event.get_group_id()
         latest = await self.client.request("GET", "/api/announcements/latest")
         ts = latest.get("published_at_ts", 0) if latest else 0
-        self.announce_mgr.add_subscription(group_id, ts)
+        await self.announce_mgr.add_subscription(group_id, ts)
         yield event.plain_result("已成功订阅公告推送！")
 
     @filter.command("取消订阅公告")
     async def unsubscribe_announcement(self, event: AstrMessageEvent):
         '''取消订阅公告推送'''
-        if not event.is_group():
+        if not event.get_group_id():
              yield event.plain_result("请在群聊中使用此命令。")
              return
         group_id = event.get_group_id()
-        self.announce_mgr.remove_subscription(group_id)
+        await self.announce_mgr.remove_subscription(group_id)
         yield event.plain_result("已取消公告订阅。")
 
     async def announcement_task(self):
@@ -1326,7 +1334,7 @@ class EndfieldPlugin(Star):
             if not subs:
                 continue
                 
-            latest = await self.client.request("GET", "/api/announcements/latest")
+            latest = await self.client.get_announcement_latest()
             if not latest or "published_at_ts" not in latest:
                 continue
                 
@@ -1335,10 +1343,11 @@ class EndfieldPlugin(Star):
                 if ts > int(s.get("since_ts", 0)):
                     # Push!
                     msg = f"【终末地新公告】\n{latest.get('title')}\n{latest.get('summary') or ''}"
-                    # How to push to group in AstrBot?
-                    # Note: Need to get group object from context
-                    # For now, just update TS to avoid repeated checks
-                    self.announce_mgr.update_since_ts(s["group_id"], ts)
+                    try:
+                        await self.context.send_message(s["group_id"], [Plain(msg)])
+                    except Exception as e:
+                        logger.error(f"Failed to push announcement to {s['group_id']}: {e}")
+                    await self.announce_mgr.update_since_ts(s["group_id"], ts)
 
 
 
@@ -1396,5 +1405,10 @@ class EndfieldPlugin(Star):
             yield event.plain_result("截图失败。")
 
     async def terminate(self):
-        await self.client.close()
+        if self._announcement_task_handle:
+            self._announcement_task_handle.cancel()
+        if self._http_client:
+            asyncio.create_task(self._http_client.aclose())
+        if self.client:
+            asyncio.create_task(self.client.close())
         logger.info("Endfield plugin terminated.")

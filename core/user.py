@@ -1,27 +1,45 @@
 import os
 import json
-from typing import List, Dict, Optional
+import asyncio
+import copy
+from typing import List, Dict, Optional, Any
+from astrbot.api import logger
 
-class UserManager:
-    def __init__(self, data_dir: str):
+class AsyncDataManager:
+    def __init__(self, data_dir: str, filename: str, default_data: Any):
         self.data_dir = data_dir
-        self.bindings_path = os.path.join(data_dir, "bindings.json")
+        self.path = os.path.join(data_dir, filename)
+        self.default_data = default_data
+        self.lock = asyncio.Lock()
         if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
+            os.makedirs(data_dir, exist_ok=True)
         self.data = self._load()
 
-    def _load(self) -> Dict[str, List[Dict]]:
-        if os.path.exists(self.bindings_path):
-            with open(self.bindings_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
+    def _load(self) -> Any:
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load {self.path}: {e}")
+        return copy.deepcopy(self.default_data)
 
-    def _save(self):
-        with open(self.bindings_path, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=4)
+    async def _save(self):
+        async with self.lock:
+            try:
+                temp_path = self.path + ".tmp"
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.data, f, ensure_ascii=False, indent=4)
+                os.replace(temp_path, self.path)
+            except Exception as e:
+                logger.error(f"Failed to save {self.path}: {e}")
+
+class UserManager(AsyncDataManager):
+    def __init__(self, data_dir: str):
+        super().__init__(data_dir, "bindings.json", {})
 
     def get_user_bindings(self, user_id: str) -> List[Dict]:
-        return self.data.get(user_id, [])
+        return copy.deepcopy(self.data.get(user_id, []))
 
     def get_primary_binding(self, user_id: str) -> Optional[Dict]:
         bindings = self.get_user_bindings(user_id)
@@ -30,12 +48,11 @@ class UserManager:
                 return b
         return bindings[0] if bindings else None
 
-    def save_user_bindings(self, user_id: str, bindings: List[Dict]):
+    async def save_user_bindings(self, user_id: str, bindings: List[Dict]):
         # Normalize and clean bindings
         cleaned = []
         seen_role_ids = set()
         
-        # Priority: primary first, then most recent last_sync
         sorted_bindings = sorted(bindings, key=lambda x: (x.get("is_primary", False), x.get("last_sync", 0)), reverse=True)
         
         for b in sorted_bindings:
@@ -44,7 +61,6 @@ class UserManager:
                 cleaned.append(b)
                 seen_role_ids.add(role_id)
         
-        # Ensure only one primary
         if cleaned:
             has_primary = False
             for b in cleaned:
@@ -57,111 +73,78 @@ class UserManager:
                 cleaned[0]["is_primary"] = True
                 
         self.data[user_id] = cleaned
-        self._save()
+        await self._save()
 
-    def delete_user_binding(self, user_id: str, binding_id: str):
+    async def delete_user_binding(self, user_id: str, binding_id: str):
         bindings = self.get_user_bindings(user_id)
         updated = [b for b in bindings if b.get("binding_id") != binding_id]
         if len(updated) < len(bindings):
-            self.save_user_bindings(user_id, updated)
+            await self.save_user_bindings(user_id, updated)
             return True
         return False
 
-class SimulateManager:
+class SimulateManager(AsyncDataManager):
     def __init__(self, data_dir: str):
-        self.path = os.path.join(data_dir, "simulate_state.json")
-        self.data = self._load()
-
-    def _load(self):
-        if os.path.exists(self.path):
-            with open(self.path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
-
-    def _save(self):
-        with open(self.path, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=4)
+        super().__init__(data_dir, "simulate_state.json", {})
 
     def get_state(self, scope: str, pool_type: str) -> Dict:
         if scope not in self.data:
             self.data[scope] = {}
-        return self.data[scope].get(pool_type, {"gacha_history": [], "pity": 0})
+        return copy.deepcopy(self.data[scope].get(pool_type, {"gacha_history": [], "pity": 0}))
 
-    def save_state(self, scope: str, pool_type: str, state: Dict):
+    async def save_state(self, scope: str, pool_type: str, state: Dict):
         if scope not in self.data:
             self.data[scope] = {}
         self.data[scope][pool_type] = state
-        self._save()
+        await self._save()
 
-class AnnouncementManager:
+class AnnouncementManager(AsyncDataManager):
     def __init__(self, data_dir: str):
-        self.path = os.path.join(data_dir, "announcements.json")
-        self.data = self._load()
+        super().__init__(data_dir, "announcements.json", {"subscriptions": [], "last_ids": []})
 
-    def _load(self):
-        if os.path.exists(self.path):
-            with open(self.path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {"subscriptions": [], "last_ids": []}
-
-    def _save(self):
-        with open(self.path, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=4)
-
-    def add_subscription(self, group_id: str, since_ts: int):
+    async def add_subscription(self, group_id: str, since_ts: int):
         for sub in self.data["subscriptions"]:
             if sub["group_id"] == group_id:
                 sub["since_ts"] = since_ts
-                self._save()
+                await self._save()
                 return
         self.data["subscriptions"].append({"group_id": group_id, "since_ts": since_ts})
-        self._save()
+        await self._save()
 
-    def remove_subscription(self, group_id: str):
+    async def remove_subscription(self, group_id: str):
         self.data["subscriptions"] = [s for s in self.data["subscriptions"] if s["group_id"] != group_id]
-        self._save()
+        await self._save()
 
     def get_subscriptions(self) -> List[Dict]:
-        return self.data.get("subscriptions", [])
+        return copy.deepcopy(self.data.get("subscriptions", []))
 
-    def update_since_ts(self, group_id: str, ts: int):
+    async def update_since_ts(self, group_id: str, ts: int):
         for sub in self.data["subscriptions"]:
             if sub["group_id"] == group_id:
                 sub["since_ts"] = ts
                 break
-        self._save()
+        await self._save()
 
-class MaaendManager:
+class MaaendManager(AsyncDataManager):
     def __init__(self, data_dir: str):
-        self.path = os.path.join(data_dir, "maaend.json")
-        self.data = self._load()
-
-    def _load(self):
-        if os.path.exists(self.path):
-            with open(self.path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {"users": {}, "groups": {}}
-
-    def _save(self):
-        with open(self.path, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=4)
+        super().__init__(data_dir, "maaend.json", {"users": {}, "groups": {}})
 
     def get_user_devices(self, user_id: str) -> List[str]:
-        return self.data["users"].get(user_id, {}).get("devices", [])
+        return copy.deepcopy(self.data["users"].get(user_id, {}).get("devices", []))
 
-    def add_user_device(self, user_id: str, device_id: str):
+    async def add_user_device(self, user_id: str, device_id: str):
         if user_id not in self.data["users"]:
             self.data["users"][user_id] = {"devices": [], "default_device": ""}
         if device_id not in self.data["users"][user_id]["devices"]:
             self.data["users"][user_id]["devices"].append(device_id)
             if not self.data["users"][user_id]["default_device"]:
                 self.data["users"][user_id]["default_device"] = device_id
-            self._save()
+            await self._save()
 
     def get_default_device(self, user_id: str) -> str:
         return self.data["users"].get(user_id, {}).get("default_device", "")
 
-    def set_default_device(self, user_id: str, device_id: str):
+    async def set_default_device(self, user_id: str, device_id: str):
         if user_id in self.data["users"] and device_id in self.data["users"][user_id]["devices"]:
             self.data["users"][user_id]["default_device"] = device_id
-            self._save()
+            await self._save()

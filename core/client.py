@@ -1,18 +1,17 @@
 import httpx
-import logging
+from astrbot.api import logger
 from typing import Optional, Dict, Any, List
-
-logger = logging.getLogger("astrbot")
 
 BASE_URL = "https://end-api.shallow.ink"
 AUTH_FRONTEND_URL = "https://end.shallow.ink"
 
 
 class EndfieldClient:
-    def __init__(self, api_key: str = "", base_url: str = BASE_URL):
+    def __init__(self, api_key: str = "", base_url: str = BASE_URL, verify_ssl: bool = True):
         self.api_key = api_key
         self.base_url = base_url
-        self.client = httpx.AsyncClient(timeout=25.0, verify=False)
+        self.verify_ssl = verify_ssl
+        self.client = httpx.AsyncClient(timeout=25.0, verify=self.verify_ssl)
 
     async def close(self):
         await self.client.aclose()
@@ -290,10 +289,26 @@ class EndfieldClient:
         """GET /api/maaend/jobs/:id"""
         return await self._get(f"/api/maaend/jobs/{job_id}")
 
+    async def set_primary_binding(self, token: str, role_id: str, server_id: int) -> bool:
+        """POST /api/enduid/set-primary"""
+        res = await self._post("/api/enduid/set-primary", body={
+            "role_id": role_id,
+            "server_id": server_id
+        }, framework_token=token)
+        return res is not None
+
     async def stop_maaend_job(self, job_id: str) -> Optional[Dict]:
         """POST /api/maaend/jobs/:id/stop"""
         return await self._post(f"/api/maaend/jobs/{job_id}/stop")
 
-    async def get_maaend_screenshot(self, device_id: str) -> Optional[Dict]:
+    async def get_maaend_screenshot(self, device_id: str) -> Optional[bytes]:
         """GET /api/maaend/devices/:id/screenshot"""
-        return await self._get(f"/api/maaend/devices/{device_id}/screenshot")
+        url = f"{self.base_url}/api/maaend/devices/{device_id}/screenshot"
+        try:
+            resp = await self.client.get(url, headers=self._headers())
+            if resp.status_code == 200:
+                return resp.content
+            logger.error(f"[Endfield API] GET {url} -> HTTP {resp.status_code}")
+        except Exception as e:
+            logger.error(f"[Endfield API] GET {url} -> Exception: {e}")
+        return None
