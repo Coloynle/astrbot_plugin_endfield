@@ -174,6 +174,16 @@ class EndfieldClient:
         """POST /api/endfield/attendance"""
         return await self._post("/api/endfield/attendance", framework_token=framework_token)
 
+    async def get_spaceship(self, framework_token: str, role_id: str = "", server_id: int = 1) -> Optional[Dict]:
+        """GET /api/endfield/spaceship"""
+        p = {"roleId": role_id, "serverId": server_id}
+        return await self._get("/api/endfield/spaceship", params=p, framework_token=framework_token)
+
+    async def get_domain(self, framework_token: str, role_id: str = "", server_id: int = 1) -> Optional[Dict]:
+        """GET /api/endfield/domain"""
+        p = {"roleId": role_id, "serverId": server_id}
+        return await self._get("/api/endfield/domain", params=p, framework_token=framework_token)
+
     async def get_search_chars(self) -> Optional[Dict]:
         """GET /api/endfield/search/chars"""
         return await self._get("/api/endfield/search/chars")

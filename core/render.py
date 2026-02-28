@@ -11,6 +11,10 @@ class Renderer:
         self._playwright = None
         self._lock = asyncio.Lock()
 
+    def get_res_path(self, sub_path: str) -> str:
+        """Returns the absolute file URL for a resource sub-path."""
+        return "file:///" + os.path.abspath(os.path.join(self.res_path, sub_path)).replace("\\", "/")
+
     def get_template(self, name: str) -> str:
         path = os.path.join(self.res_path, name)
         if os.path.exists(path):
@@ -45,17 +49,21 @@ class Renderer:
         adapted = re.sub(r'\{\{if\s+(.+?)\}\}', fix_condition, adapted)
         adapted = adapted.replace("{{/if}}", "{% endif %}").replace("{{else}}", "{% else %}")
         adapted = re.sub(r'\{\{else if\s+(.+?)\}\}', lambda m: fix_condition(m).replace("{% if", "{% elif"), adapted)
-        adapted = re.sub(r'\{\{@\s*(.+?)\s*\}\}', lambda m: "{{" + m.group(1).split('||')[0].replace('&&', 'and').replace('null', 'none') + "|safe}}", adapted)
-        adapted = re.sub(r'\{\{([^%\}]+?)\}\}', lambda m: "{{" + m.group(1).split('||')[0].replace('&&', 'and').replace('null', 'none') + "}}", adapted)
-        
         def replace_each(match):
             inner = match.group(1).strip().split()
             if len(inner) >= 2:
                 return f"{{% for {inner[1]} in {inner[0]} %}}"
             return f"{{% for item in {inner[0]} %}}"
-            
+
+        def replace_interpolation(match):
+            content = match.group(1).split('||')[0].replace('&&', 'and').replace('null', 'none').replace('.length', '|length')
+            return "{{" + content + "}}"
+
         adapted = re.sub(r'\{\{\s*each\s+(.+?)\s*\}\}', replace_each, adapted)
-        return adapted.replace("{{/each}}", "{% endfor %}")
+        adapted = adapted.replace("{{/each}}", "{% endfor %}")
+        adapted = re.sub(r'\{\{@\s*(.+?)\s*\}\}', lambda m: "{{" + m.group(1).split('||')[0].replace('&&', 'and').replace('null', 'none').replace('.length', '|length') + "|safe}}", adapted)
+        adapted = re.sub(r'\{\{([^%\}]+?)\}\}', replace_interpolation, adapted)
+        return adapted
 
     def _inline_assets(self, html: str) -> str:
         """Inlines CSS and Images to ensure Playwright renders them correctly."""
