@@ -4,10 +4,12 @@ from typing import Dict, Any, Optional
 
 class Renderer:
     def __init__(self, res_path: str, plugin: Star):
+        import asyncio
         self.plugin = plugin
         self.res_path = res_path
         self._browser = None
         self._playwright = None
+        self._lock = asyncio.Lock()
 
     def get_template(self, name: str) -> str:
         path = os.path.join(self.res_path, name)
@@ -42,9 +44,9 @@ class Renderer:
             
         adapted = re.sub(r'\{\{if\s+(.+?)\}\}', fix_condition, adapted)
         adapted = adapted.replace("{{/if}}", "{% endif %}").replace("{{else}}", "{% else %}")
-        adapted = re.sub(r'\{\{else if\s+(.+?)\}\}', lambda m: fix_condition(m).replace("if", "elif"), adapted)
-        adapted = re.sub(r'\{\{@\s*([\w\.]+)\s*\}\}', r'{{\1|safe}}', adapted)
-        adapted = re.sub(r'\{\{([^%\}]+?)\}\}', lambda m: f"{{{{{m.group(1).replace('||', 'or').replace('&&', 'and').replace('null', 'none')}}}}}", adapted)
+        adapted = re.sub(r'\{\{else if\s+(.+?)\}\}', lambda m: fix_condition(m).replace("{% if", "{% elif"), adapted)
+        adapted = re.sub(r'\{\{@\s*(.+?)\s*\}\}', lambda m: "{{" + m.group(1).split('||')[0].replace('&&', 'and').replace('null', 'none') + "|safe}}", adapted)
+        adapted = re.sub(r'\{\{([^%\}]+?)\}\}', lambda m: "{{" + m.group(1).split('||')[0].replace('&&', 'and').replace('null', 'none') + "}}", adapted)
         
         def replace_each(match):
             inner = match.group(1).strip().split()
@@ -98,7 +100,7 @@ class Renderer:
         from playwright.async_api import async_playwright
         import uuid, time
         
-        output_dir = os.path.abspath(os.path.join(self.res_path, "..", "render_cache"))
+        output_dir = os.path.abspath(os.path.join(self.res_path, "render_cache"))
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, f"render_{uuid.uuid4().hex[:8]}.png")
         
@@ -111,10 +113,11 @@ class Renderer:
                     logger.debug(f"[Endfield Render] Failed to clean cache file {f}: {e}")
 
         try:
-            if not self._playwright:
-                self._playwright = await async_playwright().start()
-            if not self._browser:
-                self._browser = await self._playwright.chromium.launch()
+            async with self._lock:
+                if not self._playwright:
+                    self._playwright = await async_playwright().start()
+                if not self._browser:
+                    self._browser = await self._playwright.chromium.launch()
                 
             context = await self._browser.new_context(device_scale_factor=2, viewport={"width": 850, "height": 800})
             page = await context.new_page()

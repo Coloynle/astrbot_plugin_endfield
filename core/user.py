@@ -37,17 +37,21 @@ class UserManager(AsyncDataManager):
     def __init__(self, data_dir: str):
         super().__init__(data_dir, "bindings.json", {})
 
-    def get_user_bindings(self, user_id: str) -> List[Dict]:
-        return copy.deepcopy(self.data.get(user_id, []))
+    async def get_user_bindings(self, user_id: Any) -> List[Dict]:
+        user_id = str(user_id)
+        async with self.lock:
+            return copy.deepcopy(self.data.get(user_id, []))
 
-    def get_primary_binding(self, user_id: str) -> Optional[Dict]:
-        bindings = self.get_user_bindings(user_id)
+    async def get_primary_binding(self, user_id: Any) -> Optional[Dict]:
+        user_id = str(user_id)
+        bindings = await self.get_user_bindings(user_id)
         for b in bindings:
             if b.get("is_primary"):
                 return b
         return bindings[0] if bindings else None
 
-    async def save_user_bindings(self, user_id: str, bindings: List[Dict]):
+    async def save_user_bindings(self, user_id: Any, bindings: List[Dict]):
+        user_id = str(user_id)
         async with self.lock:
             # Normalize and clean bindings
             cleaned = []
@@ -75,8 +79,9 @@ class UserManager(AsyncDataManager):
             self.data[user_id] = cleaned
             await self._save()
 
-    async def delete_user_binding(self, user_id: str, binding_id: str):
-        bindings = self.get_user_bindings(user_id)
+    async def delete_user_binding(self, user_id: Any, binding_id: str):
+        user_id = str(user_id)
+        bindings = await self.get_user_bindings(user_id)
         updated = [b for b in bindings if b.get("binding_id") != binding_id]
         if len(updated) < len(bindings):
             await self.save_user_bindings(user_id, updated)
@@ -87,10 +92,12 @@ class SimulateManager(AsyncDataManager):
     def __init__(self, data_dir: str):
         super().__init__(data_dir, "simulate_state.json", {})
 
-    def get_state(self, scope: str, pool_type: str) -> Dict:
-        if scope not in self.data:
-            self.data[scope] = {}
-        return copy.deepcopy(self.data[scope].get(pool_type, {"gacha_history": [], "pity": 0}))
+    async def get_state(self, scope: str, pool_type: str) -> Dict:
+        async with self.lock:
+            if scope not in self.data:
+                self.data[scope] = {}
+                await self._save()
+            return copy.deepcopy(self.data[scope].get(pool_type, {"gacha_history": [], "pity": 0}))
 
     async def save_state(self, scope: str, pool_type: str, state: Dict):
         async with self.lock:
@@ -118,8 +125,9 @@ class AnnouncementManager(AsyncDataManager):
             self.data["subscriptions"] = [s for s in self.data["subscriptions"] if s["group_id"] != group_id]
             await self._save()
 
-    def get_subscriptions(self) -> List[Dict]:
-        return copy.deepcopy(self.data.get("subscriptions", []))
+    async def get_subscriptions(self) -> List[Dict]:
+        async with self.lock:
+            return copy.deepcopy(self.data.get("subscriptions", []))
 
     async def update_since_ts(self, group_id: str, ts: int):
         async with self.lock:
@@ -133,10 +141,13 @@ class MaaendManager(AsyncDataManager):
     def __init__(self, data_dir: str):
         super().__init__(data_dir, "maaend.json", {"users": {}, "groups": {}})
 
-    def get_user_devices(self, user_id: str) -> List[str]:
-        return copy.deepcopy(self.data["users"].get(user_id, {}).get("devices", []))
+    async def get_user_devices(self, user_id: Any) -> List[str]:
+        user_id = str(user_id)
+        async with self.lock:
+            return copy.deepcopy(self.data["users"].get(user_id, {}).get("devices", []))
 
-    async def add_user_device(self, user_id: str, device_id: str):
+    async def add_user_device(self, user_id: Any, device_id: str):
+        user_id = str(user_id)
         async with self.lock:
             if user_id not in self.data["users"]:
                 self.data["users"][user_id] = {"devices": [], "default_device": ""}
@@ -146,10 +157,13 @@ class MaaendManager(AsyncDataManager):
                     self.data["users"][user_id]["default_device"] = device_id
                 await self._save()
 
-    def get_default_device(self, user_id: str) -> str:
-        return self.data["users"].get(user_id, {}).get("default_device", "")
+    async def get_default_device(self, user_id: Any) -> str:
+        user_id = str(user_id)
+        async with self.lock:
+            return self.data["users"].get(user_id, {}).get("default_device", "")
 
-    async def set_default_device(self, user_id: str, device_id: str):
+    async def set_default_device(self, user_id: Any, device_id: str):
+        user_id = str(user_id)
         async with self.lock:
             if user_id in self.data["users"] and device_id in self.data["users"][user_id]["devices"]:
                 self.data["users"][user_id]["default_device"] = device_id

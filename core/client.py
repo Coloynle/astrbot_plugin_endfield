@@ -24,24 +24,22 @@ class EndfieldClient:
             h["X-Framework-Token"] = framework_token
         return h
 
-    async def _get(self, path: str, params: Optional[Dict] = None, framework_token: Optional[str] = None) -> Optional[Dict]:
+    async def _get(self, path: str, params: Optional[Dict] = None, framework_token: Optional[str] = None) -> Optional[Any]:
         return await self._request("GET", path, params=params, framework_token=framework_token)
 
-    async def _post(self, path: str, body: Optional[Dict] = None, framework_token: Optional[str] = None) -> Optional[Dict]:
+    async def _post(self, path: str, body: Optional[Dict] = None, framework_token: Optional[str] = None) -> Optional[Any]:
         return await self._request("POST", path, json_data=body, framework_token=framework_token)
 
-    async def _delete(self, path: str, params: Optional[Dict] = None, framework_token: Optional[str] = None) -> Optional[Dict]:
+    async def _delete(self, path: str, params: Optional[Dict] = None, framework_token: Optional[str] = None) -> Optional[Any]:
         return await self._request("DELETE", path, params=params, framework_token=framework_token)
 
     async def _request(self, method: str, path: str, params: Optional[Dict] = None,
-                       json_data: Optional[Dict] = None, framework_token: Optional[str] = None) -> Optional[Dict]:
+                       json_data: Optional[Dict] = None, framework_token: Optional[str] = None) -> Optional[Any]:
         url = f"{self.base_url}{path}"
         headers = self._headers(framework_token)
         try:
             resp = await self.client.request(method, url, params=params, json=json_data, headers=headers)
-            if not resp.is_success:
-                logger.error(f"[Endfield API] {method} {path} -> HTTP {resp.status_code}: {resp.text[:300]}")
-                return None
+            resp.raise_for_status()
             data = resp.json()
             if not data:
                 return None
@@ -134,7 +132,7 @@ class EndfieldClient:
                                  params={"user_identifier": user_id, "client_type": "bot"})
         return res is not None
 
-    async def set_primary_binding_by_id(self, binding_id: str, user_id: str) -> bool:
+    async def set_primary_binding_by_id(self, binding_id: str) -> bool:
         """POST /api/v1/bindings/:id/primary"""
         res = await self._post(f"/api/v1/bindings/{binding_id}/primary")
         return res is not None
