@@ -1,167 +1,261 @@
 <div align="center">
 
-![astrbot_plugin_endfield](https://socialify.git.ci/bvzrays/astrbot_plugin_endfield/image?description=1&forks=1&issues=1&language=1&name=1&owner=1&pattern=Circuit+Board&pulls=1&stargazers=1&theme=Dark)
+# 🌌 astrbot_plugin_endfield
+### *plugin_endfield  astrbot移植版*
 
-# astrbot_plugin_endfield
-# ——点亮⭐！
-<img src="resources/img/ET logo.svg" width="200" />
+[![GitHub stars](https://img.shields.io/github/stars/bvzrays/astrbot_plugin_endfield?style=for-the-badge&color=FF6B6B)](https://github.com/bvzrays/astrbot_plugin_endfield/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/bvzrays/astrbot_plugin_endfield?style=for-the-badge&color=4ECDC4)](https://github.com/bvzrays/astrbot_plugin_endfield/network)
+[![GitHub issues](https://img.shields.io/github/issues/bvzrays/astrbot_plugin_endfield?style=for-the-badge&color=45B7D1)](https://github.com/bvzrays/astrbot_plugin_endfield/issues)
+[![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-FF6B6B?style=for-the-badge&logo=python)](https://github.com/Soulter/AstrBot)
 
-基于[森空岛 API](https://skland.com) 及 [终末地协议终端](https://end.shallow.ink) 的 AstrBot **终末地** 插件 · 绑定 / 便签 / 干员面板 / 抽卡分析 / 签到
+<img src="resources/img/ET logo.svg" width="200" alt="终末地协议终端Logo" />
+
+### 🚀 基于森空岛API & 终末地协议终端的终末地查询工具
+### 绑定 · 便签 · 干员面板 · 抽卡分析 · 签到
+
+**如果这个插件对你有帮助，请点亮⭐支持一下！**
 
 </div>
 
-## 🛠️ 安装与配置
+---
 
-1. 在 AstrBot 插件管理器中搜索 `astrbot_plugin_endfield` 并安装。
-2. 确保在系统环境中已安装并正确配置浏览器依赖以供 Playwright 渲染：`playwright install chromium`
-3. 插件配置项（按需设置）：
-   - `api_key`：请前往 [协议终端](https://end.shallow.ink) 获取。
-   - `auth_client_name`：网页授权登录时的显示名称（默认：`终末地机器人`）
-   - `operator_list_bg`：干员列表背景图选择（`random`, `bg1.png`, `bg2.png`）
-   - `render_timeout`：单次图片渲染的全局超时限制（毫秒）。
+## 📑 目录
+
+- [✨ 特性一览](#-特性一览)
+- [🔧 安装与配置](#-安装与配置)
+- [📁 项目结构](#-项目结构)
+- [🎮 功能详解](#-功能详解)
+- [📸 功能预览](#-功能预览)
+- [🎨 自定义美化](#-自定义美化)
+- [📋 TODO](#-todo)
+- [❓ 常见问题](#-常见问题)
+- [📜 更新日志](#-更新日志)
+- [🙏 鸣谢](#-鸣谢)
 
 ---
 
-## 📂 文件结构与实现
+## ✨ 特性一览
 
-<img width="639" alt="image" src="https://github.com/user-attachments/assets/c653513c-963b-4e53-b961-8a9367f60341" />
-
-### 项目目录
-- `main.py`: **插件入口**。负责 AstrBot 指令过滤、权限校验及各模块逻辑编排。
-- `core/`: **核心逻辑组件**。
-    - `client.py`: API 异步客户端，封装了森空岛与浅墨的所有网络请求逻辑。
-    - `user.py`: 用户数据中心，管理账号绑定关系与抽卡分析状态。
-    - `render.py`: 渲染助手，基于 HTML 模板的图形化输出封装。
-- `data/`: **持久化存储**。使用 local JSON 存储用户的绑定令牌。
-- `resources/`: **视觉资产与模板**。
-    - `cache/`: 并发下载器缓存目录，存储预处理后的干员立绘与头像。
-    - `operator/`, `gacha/`, `stamina/`, `help/`: 采用 **Jinja2** 编写的动态 HTML 模板。
-- `_conf_schema.json`: 插件 WebUI 配置项 schema 定义。
-- `metadata.yaml`: 记录版本号、作者、仓库等插件元数据。
+✅ **账号管理** - 多账号绑定/切换/删除，主账号快速切换  
+✅ **数据查询** - 理智、干员、抽卡、建设进度
+✅ **自动签到** - 每日自动执行森空岛签到  
+✅ **公告推送** - 官方公告实时获取与订阅  
+✅ **订阅提醒** - 理智满值时自动推送通知  
+✅ **卡池分析** - 抽卡数据统计与可视化  
 
 ---
 
-## 🎮 功能一览
+## 🔧 安装与配置
 
-| 指令前缀：`/` (或自定义) | 说明 |
-| :--- | :--- |
-| **基础功能** | |
-| `zmd` | 打开帮助菜单 |
-| **账号与绑定** | |
-| `授权登陆` | 通过森空岛网页进行安全授权登录 |
+### 快速安装
+
+在AstrBot插件管理器中搜索 `astrbot_plugin_endfield` 安装，或通过Git克隆：
+
+```bash
+cd AstrBot/data/plugins
+git clone https://github.com/bvzrays/astrbot_plugin_endfield.git
+```
+
+### 环境依赖
+
+确保已安装Playwright浏览器内核：
+
+```bash
+playwright install chromium
+```
+
+### 配置项说明
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|:-------|:-----|:-------|:-----|
+| `api_key` | string | 无 | ⚠️ 必填，前往[协议终端](https://end.shallow.ink)获取 |
+| `auth_client_name` | string | `终末地机器人` | 网页授权登录时的显示名称 |
+| `operator_list_bg` | string | `random` | 干员列表背景图 (`random`/`bg1.png`/`bg2.png`) |
+| `render_timeout` | number | `30000` | 图片渲染超时时间（毫秒） |
+
+---
+
+## 📁 项目结构
+
+```
+astrbot_plugin_endfield/
+├── main.py                 # 插件入口，指令路由
+├── metadata.yaml           # 插件元数据
+├── _conf_schema.json       # WebUI配置schema
+├── core/                   # 核心逻辑
+│   ├── client.py           # API异步客户端
+│   ├── user.py             # 用户数据中心
+│   └── render.py           # HTML渲染助手
+├── data/                   # 持久化存储
+│   └── users.json          # 用户绑定数据
+└── resources/              # 资源文件
+    ├── cache/              # 图片缓存
+    ├── img/                # 静态图片资源
+    ├── operator/           # 干员列表模板
+    ├── gacha/              # 抽卡分析模板
+    ├── stamina/            # 理智模板
+    └── help/               # 帮助菜单模板
+```
+
+---
+
+## 🎮 功能详解
+
+> 💡 **指令前缀**：默认为 `/`，在AstrBot配置中自定义
+
+### 🔐 账号与绑定
+
+| 指令 | 说明 |
+|:-----|:-----|
+| `授权登陆` | 网页安全授权登录（推荐） |
 | `扫码绑定` | 扫描二维码快捷登录 |
-| `手机绑定 [手机号]` | 接收验证码登录（不可用） |
-| `绑定列表` | 查看当前所有已绑定的账号状态 |
+| `手机绑定 [手机号]` | 验证码登录（暂不可用） |
+| `绑定列表` | 查看所有绑定账号 |
 | `切换绑定 [序号]` | 切换当前主账号 |
-| `删除绑定 [序号]` | 删除指定账号绑定 |
-| **数据查询 (渲染图)** | |
-| `便签` | 查询账号数据总览 |
-| `理智/订阅理智` | 查询当前理智、日常活跃度、回满时间/自动满值推送 |
-| `干员列表` | 查询当前持有的干员图鉴及等级 |
-| `<干员名>面板` | 查询单个干员的当前面板（不可用） |
-| `抽卡记录` | 查询近期抽卡历史记录 |
-| `抽卡分析` | 生成全卡池抽卡数据统计分析图 |
-| `签到` | 执行所有账号的森空岛每日签到，每日自动 |
-| `日历` | 查看活动版本日历图（自动获取Wiki横幅） |
-| `帝江号建设` | 查询基础建设进度 |
-| `地区建设` | 查询地区开发进度 |
-| `公告/订阅公告` | 获取官方公告列表及推送 |
+| `删除绑定 [序号]` | 解绑指定账号 |
+
+### 📊 数据查询
+
+| 指令 | 说明 |
+|:-----|:-----|
+| `便签` | 账号数据总览 |
+| `理智` / `订阅理智` | 理智查询/满值推送 |
+| `干员列表` | 持有干员图鉴 |
+| `<干员名>面板` | 单干员详情（开发中） |
+| `抽卡记录` | 近期抽卡历史 |
+| `抽卡分析` | 全卡池统计分析 |
+| `签到` | 执行每日签到 |
+| `日历` | 活动版本日历 |
+| `帝江号建设` | 基建进度查询 |
+| `地区建设` | 地区开发进度 |
+| `公告` / `订阅公告` | 官方公告列表/推送 |
 
 ---
 
-## 🖼️ 功能截图
+## 📸 功能预览
+
+<details>
+<summary>点击展开预览图</summary>
 
 | `便签` | `理智` |
-| :---: | :---: |
+|:---:|:---:|
 | <img src="https://github.com/user-attachments/assets/d9c07469-f00d-42c2-820a-f46402adf714" width="400"> | <img src="https://github.com/user-attachments/assets/0a723c50-d81d-444f-932e-32918a0ee2ed" width="400"> |
 
 | `干员列表` | `抽卡分析` |
-| :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/3355b411-215a-4bf9-b536-e67804e8d122" width="400"> | <img src="https://github.com/user-attachments/assets/5e86a76b-0d06-4f7b-97fc-6b914f57efb3" width="200"> <img src="https://github.com/user-attachments/assets/17d09d14-ad26-4499-8201-ddbcc72acda6" width="100"> |
+|:---:|:---:|
+| <img src="https://github.com/user-attachments/assets/3355b411-215a-4bf9-b536-e67804e8d122" width="400"> | <img src="https://github.com/user-attachments/assets/5e86a76b-0d06-4f7b-97fc-6b914f57efb3" width="300"> |
 
-| `抽卡记录` | `帝江号建设` |
-| :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/aacab909-6a04-467a-aeaf-a525558e1ddb" width="400"> | <img src="https://github.com/user-attachments/assets/df71bbdf-febb-4f00-95ba-157f5788629f" width="400"> |
+| `帝江号建设` | `地区建设` |
+|:---:|:---:|
+| <img src="https://github.com/user-attachments/assets/df71bbdf-febb-4f00-95ba-157f5788629f" width="400"> | <img src="https://github.com/user-attachments/assets/cf3b53b9-fa78-4b71-b682-9077dfafc3c1" width="400"> |
 
-| `地区建设` | `公告` |
-| :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/cf3b53b9-fa78-4b71-b682-9077dfafc3c1" width="400"> | <img src="https://github.com/user-attachments/assets/99da9389-1326-487c-b11e-d526d0e251fb" width="400"> |
+| `公告` | `日历` |
+|:---:|:---:|
+| <img src="https://github.com/user-attachments/assets/99da9389-1326-487c-b11e-d526d0e251fb" width="400"> | <img src="https://github.com/user-attachments/assets/b3dbe4c9-d916-4abd-aeee-a434a43d4c0f" width="600"> |
 
-| `日历` |
-| :---: |
-| <img src="https://github.com/user-attachments/assets/b3dbe4c9-d916-4abd-aeee-a434a43d4c0f" width="600"> |
+</details>
 
 ---
 
-## 🎨 资源自定义 (背景与头像修改)
+## 🎨 自定义美化
 
-你可以通过替换插件目录中的资源文件来自定义生成的渲染图片样式：
-路径：`AstrBot/data/plugins/astrbot_plugin_endfield/resources/`
+你可以通过替换资源文件来自定义渲染图片样式：
 
-- **理智图背景**：放入 `resources/img/stbg.png`
-- **干员列表背景**：放入 `resources/operator/img/opbg.png`
-- **随机干员立绘/头像**：放入 `resources/img/operator/` 文件夹下
-  - 在生成 `/理智` 图时，系统会默认在此文件夹下随机抽取图片作为右侧展示。支持 `png`, `jpg`, `webp` 格式。
+**路径：** `AstrBot/data/plugins/astrbot_plugin_endfield/resources/`
+
+| 功能 | 自定义方式 |
+|:-----|:----------|
+| **理智图背景** | 替换 `img/stbg.png` |
+| **干员列表背景** | 替换 `operator/img/opbg.png` |
 
 ---
 
-## 📝 TODO (后续计划)
+## 📋 TODO
 
-- [x] **终末地信息查询** (`帝江号建设`, `地区建设`, `订阅理智`, `日历`)
-- [x] **公告系统** (官方公告列表及推送)
-- [ ] **抽卡辅助** (全服抽卡统计、模拟抽卡)
-- [ ] **Wiki 百科增强** (装备、战术物品、武器百科)
+- [x] **基础查询** (帝江号建设/地区建设/订阅理智/日历)
+- [x] **公告系统** (列表获取与推送)
+- [ ] **抽卡辅助** (全服统计/模拟抽卡)
+- [ ] **Wiki增强** (装备/物品/武器百科)
 - [ ] **攻略模块** (角色/地图攻略图)
-- [ ] **MaaEnd 远程控制** (MaaEnd Client 远程控制与状态监控)
-- [ ] **管理员功能** (全员自动签到、强制同步数据)
+- [ ] **MaaEnd远程控制** (状态监控与远程操作)
+- [ ] **管理员功能** (全员签到/数据同步)
 
 ---
 
-## 💡 常见问题排查
+## ❓ 常见问题
 
-1. 是否已执行 `playwright install chromium` 确保无头浏览器正常。
-2. 若图片卡死、发生 500 报错，可进入 `render_cache/` 检查本地渲染情况。
+### Q1: 安装后无法渲染图片？
+✅ 检查是否已执行 `playwright install chromium`，确保无头浏览器正常安装。
+
+### Q2: 图片生成卡死或报500错误？
+✅ 检查 `render_cache/` 目录的读写权限，尝试清除缓存后重试。
+
+### Q3: 绑定失败怎么办？
+✅ 确认已在[协议终端](https://end.shallow.ink)获取有效的 `api_key`，并检查网络连通性，注意网络环境的切换可能会导致。
+
+
+---
 
 ## 📜 更新日志
 
+<details>
+<summary>点击展开版本历史</summary>
+
 ### 1.6.0 (2026-03-01)
-- 新增 `/日历`：支持自动爬取 Wiki 长条横幅背景
-- 优化日历布局，增加理智、绑定列表 UI 细节
-- 自动签到功能与订阅理智功能（待测试）
+- ✨ 新增 `/日历` 指令，自动获取Wiki横幅
+- 🎨 优化日历UI和绑定列表显示
+- 🔧 完善自动签到与订阅理智功能
 
 ### 1.5.0 (2026-03-01)
-- 新增 `/帝江号建设`、`/地区建设`
-- 重构信赖与心情展示，增加 `短尺背景.png`
+- ✨ 新增 `/帝江号建设`、`/地区建设` 指令
+- 🎨 重构信赖与心情展示UI
 
 ### 1.4.0 (2026-02-28)
-- 新增官方公告列表渲染功能 (`/公告`)
-- 新增官方单条公告详情提取及渲染功能 (`/公告 <序号>`, `/公告最新`)
-- 支持了图片动态填充
-  
+- ✨ 新增公告列表渲染 (`/公告`)
+- ✨ 新增单条公告详情 (`/公告 <序号>`)
+- 🚀 优化图片动态填充逻辑
+
 ### 1.3.0 (2026-02-27)
-- 抽卡分析重构：移除 5 星标记
-- 优化渲染稳定性：Playwright 导航超时增加至 30s
+- 📊 重构抽卡分析，移除5星标记
+- ⚡ 提升渲染稳定性，超时延长至30s
 
 ### 1.2.0 (2026-02-27)
-- 抽卡分析异步化优化
-- 便签面板UI重绘
-- 干员列表UI修复
-- 帮助菜单重绘为图片（`zmd` 指令）
-- 优化了图片请求并发逻辑
+- ⚡ 抽卡分析异步化优化
+- 🎨 便签面板UI重绘
+- 🐛 修复干员列表显示问题
+- 🖼️ 帮助菜单改为图片输出
 
 ### 1.1.0 (2026-02-26)
-- 修复了理智查询问题
-- 增加了干员列表功能
+- 🐛 修复理智查询问题
+- ✨ 新增干员列表功能
+
+</details>
+
 ---
 
-## 🤝 鸣谢
+## 🙏 鸣谢
 
-本项目参考自 Yunzai 插件 [endfield-plugin](https://github.com/Entropy-Increase-Team/endfield-plugin)。
-- 感谢：[@QingYingX](https://github.com/QingYingX) 与 [@浅巷墨黎](https://github.com/dnyo666)
-- 感谢 [终末地协议终端](https://end.shallow.ink) 提供的底层封装。
+本项目参考自Yunzai插件 [endfield-plugin](https://github.com/Entropy-Increase-Team/endfield-plugin)。
 
-> [!TIP]
-> 终末地-协议终端 交流群：[160759479](https://qm.qq.com/q/zZXruW6V4Q)
-> astrbot 移植版作者反馈群：[870543663](https://qm.qq.com/q/kPxQZy5gg8)
+特别感谢：
+- [@QingYingX](https://github.com/QingYingX) & [@浅巷墨黎](https://github.com/dnyo666)
+- [终末地协议终端](https://end.shallow.ink) 提供的底层API封装
+- 所有贡献者和测试者
 
+---
 
+<div align="center">
+
+### 💬 加入
+
+| 终末地协议终端交流群 | AstrBot移植版反馈群 |
+|:---:|:---:|
+| [160759479](https://qm.qq.com/q/zZXruW6V4Q) | [870543663](https://qm.qq.com/q/kPxQZy5gg8) |
+
+---
+
+**如果喜欢这个插件，别忘了给仓库点个⭐！**
+
+[⬆ 返回顶部](#-astrbot_plugin_endfield)
+
+</div>
