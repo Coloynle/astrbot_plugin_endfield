@@ -155,7 +155,8 @@ astrbot_plugin_endfield/
 
 | `xx面板` | `zmd` |
 |:---:|:---:|
-| <img src="https://github.com/user-attachments/assets/99da9389-1326-487c-b11e-d526d0e251fb" width="400"> | <img src="https://github.com/user-attachments/assets/b3dbe4c9-d916-4abd-aeee-a434a43d4c0f" width="600"> |
+| <img width="2200" height="2036" alt="9045c4a094a6b434815e31abc696dbac" src="https://github.com/user-attachments/assets/d8422043-106f-44e3-9b61-4b3faa5998f0" /> | <img width="1280" height="1480" alt="d4082ea8f03d293df5a73d21e7ed3acc_720" src="https://github.com/user-attachments/assets/4bb0bf3d-b9b9-43f2-a5ba-81bc7909956f" />
+ |
 
 </details>
 
@@ -269,5 +270,6 @@ astrbot_plugin_endfield/
 [⬆ 返回顶部](#-astrbot_plugin_endfield)
 
 </div>
+
 
 
