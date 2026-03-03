@@ -41,6 +41,17 @@
     "type": "string",
     "default": "00:05"
   },
+  "auto_sign_in_interval": {
+    "description": "自动签到账号间隔（秒）",
+    "type": "int",
+    "default": 3
+  },
+  "auto_sign_in_notify_group": {
+    "description": "自动签到通知群号",
+    "type": "string",
+    "hint": "填入群号。若无法发送，请尝试填入完整 ID (如 aiocqhttp:group:123456)",
+    "default": ""
+  },
   "sanity_poll_interval": {
     "description": "理智订阅轮询间隔（分钟）",
     "type": "int",

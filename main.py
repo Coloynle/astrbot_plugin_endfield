@@ -1,16 +1,26 @@
 import asyncio
+import datetime
+import hashlib
+import ipaddress
+import mimetypes
 import os
+import random
+import re
+import socket
 import time
+import uuid
 import base64
 import tempfile
+import httpx
+from urllib.parse import urlparse
 from astrbot.api import logger
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import Plain, Image, At
 
 from .core.client import EndfieldClient
-from .core.user import UserManager, SimulateManager, AnnouncementManager, MaaendManager, SanityManager
+from .core.user import UserManager, SimulateManager, AnnouncementManager, MaaendManager, SanityManager, SignManager
 from .core.utils import get_message
 from .core.render import Renderer
 
@@ -88,7 +98,7 @@ def build_detail_render_data(item: dict) -> dict:
         "pageWidth": 720
     }
 
-@register("astrbot_plugin_endfield", "bvzrays & 熵增项目组", "终末地协议终端", "v1.6.0", "https://github.com/Entropy-Increase-Team/astrbot_plugin_endfield")
+@register("astrbot_plugin_endfield", "bvzrays & 熵增项目组", "终末地协议终端", "v1.8.0", "https://github.com/Entropy-Increase-Team/astrbot_plugin_endfield")
 class EndfieldPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -97,10 +107,12 @@ class EndfieldPlugin(Star):
         self.verify_ssl = config.get("verify_ssl", True) if config else True
         self.auto_sign_in = config.get("auto_sign_in", True) if config else True
         self.auto_sign_in_time = config.get("auto_sign_in_time", "00:05") if config else "00:05"
+        self.auto_sign_in_interval = config.get("auto_sign_in_interval", 3) if config else 3
+        self.auto_sign_in_notify_group = config.get("auto_sign_in_notify_group", "") if config else ""
         self.client = EndfieldClient(self.api_key, verify_ssl=self.verify_ssl)
         
         # Use StarTools.get_data_dir() for persistence compliance
-        data_dir = StarTools.get_data_dir()
+        data_dir = str(StarTools.get_data_dir())
         if not os.path.exists(data_dir):
             os.makedirs(data_dir, exist_ok=True)
             
@@ -109,6 +121,7 @@ class EndfieldPlugin(Star):
         self.announce_mgr = AnnouncementManager(data_dir)
         self.sanity_mgr = SanityManager(data_dir)
         self.maa_mgr = MaaendManager(data_dir)
+        self.sign_mgr = SignManager(data_dir)
         
         res_path = os.path.join(os.path.dirname(__file__), "resources")
         self.renderer = Renderer(res_path, self)
@@ -123,8 +136,11 @@ class EndfieldPlugin(Star):
         if name in self.banner_cache:
             return self.banner_cache[name]
             
+        # Limit cache size to prevent memory leak
+        if len(self.banner_cache) > 200:
+            self.banner_cache.clear() # Simple clear if too big
+
         pc_link = act.get("pc_link", "")
-        import re
         match = re.search(r'gameEntryId=(\d+)', pc_link)
         if match:
             entry_id = match.group(1)
@@ -148,7 +164,6 @@ class EndfieldPlugin(Star):
         return pic
 
     async def get_b64(self, rp):
-        import mimetypes, base64, httpx, hashlib, asyncio
         if not rp:
             return ""
             
@@ -161,23 +176,19 @@ class EndfieldPlugin(Star):
             
         if rp.startswith("http://") or rp.startswith("https://"):
             url_hash = hashlib.md5(rp.encode()).hexdigest()
-            # Try to guess extension from URL or use .png as default
             ext = ".png"
             if "." in rp.split("/")[-1]:
                 ext = "." + rp.split("/")[-1].split(".")[-1].split("?")[0]
-                if len(ext) > 5: ext = ".png" # Fix for weird query params
+                if len(ext) > 5: ext = ".png"
                 
-            # Strict SSRF prevention using actual IP resolution
-            from urllib.parse import urlparse
-            import socket, ipaddress
-            
+            # Async SSRF prevention - non-blocking DNS resolution
             try:
                 parsed_url = urlparse(rp)
                 hostname = parsed_url.hostname
                 if not hostname:
                     return ""
-                    
-                addr_info = socket.getaddrinfo(hostname, None)
+                loop = asyncio.get_event_loop()
+                addr_info = await loop.getaddrinfo(hostname, None)
                 for addr in addr_info:
                     ip = addr[4][0]
                     ip_obj = ipaddress.ip_address(ip)
@@ -189,16 +200,12 @@ class EndfieldPlugin(Star):
                 return ""
                 
             cache_file = os.path.join(cache_dir, f"{url_hash}{ext}")
-            
             if os.path.exists(cache_file):
-                # Return file:/// URI for Playwright to load directly from disk (much faster)
                 return "file:///" + os.path.abspath(cache_file).replace("\\", "/")
                     
             try:
-                # Use persistent client session if possible
                 if self._http_client is None or self._http_client.is_closed:
                     self._http_client = httpx.AsyncClient(verify=self.verify_ssl)
-                
                 client = self._http_client
                 for attempt in range(3):
                     try:
@@ -237,6 +244,12 @@ class EndfieldPlugin(Star):
         # Auto Sign-in Task
         if self.auto_sign_in:
             self._auto_sign_in_task_handle = asyncio.create_task(self.auto_sign_in_task())
+            # Startup check: if not signed in today, run it now
+            now_date = datetime.datetime.now().strftime("%Y-%m-%d")
+            last_date = await self.sign_mgr.get_last_sign_date()
+            if now_date != last_date:
+                logger.info(f"[Endfield Auto Sign-In] Startup check: Not signed in today ({now_date} != {last_date}). Running now.")
+                asyncio.create_task(self.run_batch_sign_in())
 
     @filter.command("zmd")
     async def zmd_help(self, event: AstrMessageEvent):
@@ -270,7 +283,8 @@ class EndfieldPlugin(Star):
                         {"title": "便签", "desc": "账号数据总览", "icon": True},
                         {"title": "理智 / 订阅理智", "desc": "理智查询/满值推送", "icon": True},
                         {"title": "干员列表", "desc": "持有干员图鉴", "icon": True},
-                        {"title": "<干员名>面板", "desc": "单干员详情（开发中）", "icon": True},
+                        {"title": "<干员名>面板", "desc": "单干员详情", "icon": True},
+                        {"title": "同步面板", "desc": "同步干员战斗属性数据", "icon": True},
                         {"title": "抽卡记录", "desc": "近期抽卡历史", "icon": True},
                         {"title": "抽卡分析", "desc": "全卡池统计分析", "icon": True},
                         {"title": "签到", "desc": "执行每日签到", "icon": True},
@@ -285,7 +299,7 @@ class EndfieldPlugin(Star):
             "colCount": 3,
             "colWidth": 380,
             "widthGap": 24,
-            "copyright": "Endfield Protocol Terminal | v1.7.0",
+            "copyright": "Endfield Protocol Terminal | v1.8.0",
             "pluResPath": "file:///" + os.path.abspath(self.renderer.res_path).replace("\\", "/") + "/"
         }
         
@@ -953,12 +967,16 @@ class EndfieldPlugin(Star):
     @filter.regex(r"^\*?(?:终末地)?\s*(.+?)\s*(?:终末地)?面板$")
     async def operator_panel(self, event: AstrMessageEvent):
         '''查询干员详细面板'''
-        import re as _re
+        import re
         msg = event.get_message_str().strip()
-        m = _re.match(r"^\*?(?:终末地)?\s*(.+?)\s*(?:终末地)?面板$", msg)
+        m = re.match(r"^\*?(?:终末地)?\s*(.+?)\s*(?:终末地)?面板$", msg)
         char_name = m.group(1).strip() if m else ""
         if not char_name:
             yield event.plain_result("请指定干员名称，例如：莱万汀面板")
+            return
+        
+        # Guard: ignore reserved system command keywords
+        if char_name in {"同步", "绑定", "理智", "便签", "签到", "日历", "公告", "菜单", "帮助"}:
             return
 
         user_id = event.get_sender_id()
@@ -970,222 +988,107 @@ class EndfieldPlugin(Star):
         yield event.plain_result(f"正在查询 {char_name} 的面板...")
         
         token = binding.get("framework_token")
-        role_id = binding.get("role_id")
-        server_id = binding.get("server_id", 1)
-
-        # 1. Get note to find the character by name
-        note = await self.client.get_note(token, role_id, server_id)
+        note = await self.client.get_note(token, binding["role_id"], int(binding.get("server_id", 1)))
         if not note or "chars" not in note:
             yield event.plain_result("获取干员列表失败。")
             return
 
-        chars = note["chars"]
-        base_info = note.get("base", {})
-        # Exact match first, then fuzzy
-        matched = next((c for c in chars if c.get("name", "") == char_name), None)
+        matched = next((c for c in note["chars"] if c.get("name", "") == char_name), None)
         if not matched:
-            matched = next((c for c in chars if char_name in c.get("name", "")), None)
+            matched = next((c for c in note["chars"] if char_name in c.get("name", "")), None)
         if not matched:
             yield event.plain_result(f"未在当前账号找到干员 {char_name}。")
             return
 
         inst_id = matched.get("id")
-        if not inst_id:
-            yield event.plain_result("找到干员但缺少实例 ID，无法查询详情。")
-            return
-
-        # 2. Fetch full operator detail
         full_res = await self.client.get_card_char(token, inst_id)
         if not full_res:
             yield event.plain_result("获取面板详情失败。")
             return
 
-        # Extract structure - actual API: full_res = {code, message, data: {detail: {...}}}
-        detail = (full_res.get("data") or {}).get("detail") or full_res.get("detail") or full_res
-        char_data = detail.get("charData") or {}
-        user_skills = detail.get("userSkills") or {}
+        # Fetch synced panel data for combat stats
+        template_id = matched.get("template_id") or matched.get("templateId")
+        if not template_id:
+            panel_chars_res = await self.client.get_panel_chars(token)
+            if panel_chars_res and "synced_chars" in panel_chars_res:
+                for pc in panel_chars_res["synced_chars"]:
+                    pc_name = pc.get("name_cn") or pc.get("name", "")
+                    if pc_name == char_name or char_name in pc_name or pc_name in char_name:
+                        template_id = pc.get("template_id")
+                        break
 
-        if not char_data:
-            yield event.plain_result("干员数据结构异常，无法渲染面板。")
+        panel_stats = {"summary": {}}
+        if template_id:
+            panel_res = await self.client.get_panel_char(token, template_id)
+            if panel_res:
+                p = panel_res.get("panel") if "panel" in panel_res else panel_res
+                if p and "summary" in p: panel_stats = p
+
+        try:
+            render_data = self._prepare_operator_render_data(full_res, panel_stats, binding, matched)
+            url = await self.renderer.render_html("operator/operator.html", render_data)
+            if url:
+                yield event.image_result(url)
+            else:
+                yield event.plain_result("图片渲染失败。")
+        except Exception as e:
+            logger.error(f"Error rendering operator panel for {char_name}: {e}")
+            yield event.plain_result(f"渲染面板出错: {e}")
+
+    @filter.command("同步面板")
+    async def sync_panel(self, event: AstrMessageEvent):
+        '''同步干员面板数据（用于获取攻击力等战斗属性）'''
+        user_id = event.get_sender_id()
+        binding = await self.user_mgr.get_primary_binding(user_id)
+        if not binding:
+            yield event.plain_result("未绑定账号，请先绑定。")
             return
 
-        def _parse_rarity(raw):
-            val = raw.get("value", 1) if isinstance(raw, dict) else 1
-            try:
-                return max(1, min(6, int(val)))
-            except Exception:
-                return 1
+        token = binding.get("framework_token")
 
-        def _make_stars(r):
-            return list(range(1, r + 1))
+        # Trigger sync
+        sync_res = await self.client.sync_panel(token)
+        if not sync_res:
+            yield event.plain_result("❌ 触发面板同步失败，请稍后再试。")
+            return
 
-        def _pick_equip(slot_raw):
-            if not isinstance(slot_raw, dict):
-                return None
-            raw = slot_raw.get("equipData") or slot_raw
-            if not raw or not raw.get("name"):
-                return None
-            lv_field = raw.get("level", "")
-            lv = lv_field.get("value") if isinstance(lv_field, dict) else lv_field
-            r = _parse_rarity(raw.get("rarity", {}))
-            return {"name": raw.get("name", ""), "iconUrl": raw.get("iconUrl", ""), "level": lv, "stars": _make_stars(r)}
+        yield event.plain_result("🔄 面板同步已提交，请稍候...")
 
-        rarity = _parse_rarity(char_data.get("rarity", {}))
-        stars = _make_stars(rarity)
-        potential_level = min(5, max(0, int(detail.get("potentialLevel", 0) or 0)))
-        potential_stars = [i < potential_level for i in range(5)]
-        evolve_phase = int(detail.get("evolvePhase", 0) or 0)  # 0-4
+        # Poll silently until done
+        import asyncio as _asyncio
+        max_wait = 90  # max 90s
+        elapsed = 0
+        interval = 3
+        while elapsed < max_wait:
+            await _asyncio.sleep(interval)
+            elapsed += interval
+            status_res = await self.client.get_panel_sync_status(token)
+            if not status_res:
+                continue
+            status = status_res.get("status", "")
+            total = status_res.get("total", 0)
+            failed = status_res.get("failed_ids", [])
 
-        # Skill type label mapping
-        _skill_type_map = {
-            "skill_type_normal_attack": "普通攻击",
-            "skill_type_normal_skill": "战技",
-            "skill_type_combo_skill": "连携技",
-            "skill_type_ultimate_skill": "终结技",
-        }
+            if status == "completed" or status == "idle":
+                # Fetch synced character list for names
+                chars_res = await self.client.get_panel_chars(token)
+                char_names = []
+                if chars_res and "synced_chars" in chars_res:
+                    char_names = [c.get("name_cn") or c.get("name") or "?" for c in chars_res["synced_chars"]]
 
-        raw_skills = char_data.get("skills") or []
-        skills = []
-        for s in raw_skills:
-            s_id = s.get("id", "")
-            u = user_skills.get(s_id, {}) if isinstance(user_skills, dict) else {}
-            skill_type_key = (s.get("type") or {}).get("key", "")
-            skills.append({
-                "name": s.get("name", "未知"),
-                "iconUrl": s.get("iconUrl", ""),
-                "level": u.get("level", 1),
-                "maxLevel": u.get("maxLevel", ""),
-                "typeLabel": _skill_type_map.get(skill_type_key, ""),
-                "typeKey": skill_type_key,
-            })
-        display_skills = skills[:4]
-        while len(display_skills) < 4:
-            display_skills.append({"empty": True})
-
-        weapon_raw = detail.get("weapon")
-        weapon = None
-        if isinstance(weapon_raw, dict):
-            w_data = weapon_raw.get("weaponData", {})
-            if w_data and w_data.get("name"):
-                wr = _parse_rarity(w_data.get("rarity", {}))
-                w_passive_skills = [s.get("value", "") for s in (w_data.get("skills") or []) if s.get("value")]
-                weapon = {
-                    "name": w_data.get("name", ""),
-                    "level": weapon_raw.get("level", 0),
-                    "iconUrl": w_data.get("iconUrl", ""),
-                    "stars": _make_stars(wr),
-                    "refineLevel": weapon_raw.get("refineLevel", 0),
-                    "breakthroughLevel": weapon_raw.get("breakthroughLevel", 0),
-                    "passiveSkills": w_passive_skills,
-                }
-
-        def _pick_equip_full(slot_raw):
-            if not isinstance(slot_raw, dict):
-                return None
-            raw = slot_raw.get("equipData") or slot_raw
-            if not raw or not raw.get("name"):
-                return None
-            lv_field = raw.get("level", "")
-            lv = lv_field.get("value") if isinstance(lv_field, dict) else lv_field
-            r_raw = raw.get("rarity", {})
-            r = _parse_rarity(r_raw)
-            rarity_label = r_raw.get("value", "") if isinstance(r_raw, dict) else ""
-            suit = raw.get("suit") or {}
-            return {
-                "name": raw.get("name", ""),
-                "iconUrl": raw.get("iconUrl", ""),
-                "level": lv,
-                "stars": _make_stars(r),
-                "rarityLabel": rarity_label,
-                "suitName": suit.get("name", ""),
-                "suitId": suit.get("id", ""),
-            }
-
-        body_equip = _pick_equip_full(detail.get("bodyEquip") or {})
-        arm_equip = _pick_equip_full(detail.get("armEquip") or {})
-        first_acc = _pick_equip_full(detail.get("firstAccessory") or {})
-        second_acc = _pick_equip_full(detail.get("secondAccessory") or {})
-
-        # Calculate suit activation counts
-        suit_counts: dict = {}
-        for eq in [body_equip, arm_equip, first_acc, second_acc]:
-            if eq and eq.get("suitId"):
-                suit_counts[eq["suitId"]] = suit_counts.get(eq["suitId"], 0) + 1
-        # Annotate each equip with suit activated count
-        for eq in [body_equip, arm_equip, first_acc, second_acc]:
-            if eq and eq.get("suitId"):
-                eq["suitCount"] = suit_counts.get(eq["suitId"], 0)
-            elif eq:
-                eq["suitCount"] = 0
-
-        tact_slot = detail.get("tacticalItem")
-        tactical_item = None
-        if isinstance(tact_slot, dict):
-            tact_data = tact_slot.get("tacticalItemData", {})
-            if tact_data and tact_data.get("name"):
-                # Resolve activeEffect template params
-                effect_text = tact_data.get("activeEffect", "")
-                effect_params = tact_data.get("activeEffectParams") or {}
-                import re as _re2
-                for k, v in effect_params.items():
-                    effect_text = _re2.sub(r'\{' + k + r'(?::[^}]+)?\}', str(v), effect_text)
-                # Strip rich text tags like <@ba.vup>, </>
-                effect_text = _re2.sub(r'<[^>]+>', '', effect_text).strip()
-                tact_r_raw = tact_data.get("rarity", {})
-                tact_r = _parse_rarity(tact_r_raw)
-                tactical_item = {
-                    "name": tact_data.get("name", ""),
-                    "iconUrl": tact_data.get("iconUrl", ""),
-                    "activeEffect": effect_text,
-                    "rarityLabel": tact_r_raw.get("value", "") if isinstance(tact_r_raw, dict) else "",
-                    "stars": _make_stars(tact_r),
-                }
-
-        tags_list = [t for t in (char_data.get("tags") or []) if t]
-        illustration_url = (char_data.get("illustrationUrl") or char_data.get("avatarRtUrl") or matched.get("avatarRtUrl", ""))
-        avatar_sq_url = char_data.get("avatarSqUrl") or char_data.get("avatarRtUrl") or ""
-
-        user_nickname = base_info.get("name") or binding.get("nickname") or "干员"
-        user_level = int(base_info.get("level", 0) or 0)
-        user_avatar_url = base_info.get("avatarUrl") or binding.get("avatarUrl", "")
-        user_avatar_b64 = await self.get_b64(user_avatar_url) if user_avatar_url else ""
-
-        res_prefix = "file:///" + os.path.abspath(self.renderer.res_path).replace("\\", "/") + "/"
-        render_data = {
-            "name": char_data.get("name", char_name),
-            "level": detail.get("level", 0),
-            "stars": stars,
-            "rarity": rarity,
-            "profession": char_data.get("profession", {}).get("value", ""),
-            "property": char_data.get("property", {}).get("value", ""),
-            "weaponTypeName": char_data.get("weaponType", {}).get("value", ""),
-            "illustrationUrl": illustration_url,
-            "avatarSqUrl": avatar_sq_url,
-            "evolvePhase": evolve_phase,
-            "potentialStars": potential_stars,
-            "tagsList": tags_list,
-            "displaySkills": display_skills,
-            "weapon": weapon,
-            "bodyEquip": body_equip,
-            "armEquip": arm_equip,
-            "firstAccessory": first_acc,
-            "secondAccessory": second_acc,
-            "tacticalItem": tactical_item,
-            "userNickname": user_nickname,
-            "userLevel": user_level,
-            "userAvatar": user_avatar_b64,
-            "friendPanel": None,
-            "pluResPath": res_prefix,
-            "copyright": "Endfield Plugin | AstrBot",
-        }
-        try:
-            img_url = await self.renderer.render_html("operator/operator.html", render_data)
-            if img_url:
-                yield event.image_result(img_url)
+                msg = f"✅ 面板同步完成！共同步 {total or len(char_names)} 名干员。"
+                if char_names:
+                    msg += "\n" + "、".join(char_names)
+                if failed:
+                    msg += f"\n⚠️ {len(failed)} 名干员同步失败。"
+                yield event.plain_result(msg)
                 return
-        except Exception as e:
-            logger.warning(f"渲染干员面板失败，使用文本回退: {e}")
-        yield event.plain_result(f"【{char_name}】Lv.{render_data['level']} ({rarity}★)")
+            elif status == "failed":
+                yield event.plain_result("❌ 面板同步失败，请稍后重试。")
+                return
+            # syncing / pending: keep polling silently
+
+        yield event.plain_result("⏱ 同步超时，数据可能已在后台更新，稍后查看干员面板即可。")
 
     @filter.command("抽卡记录")
     async def gacha_records(self, event: AstrMessageEvent, page: int = 1):
@@ -1307,243 +1210,115 @@ class EndfieldPlugin(Star):
             return
             
         token = binding.get("framework_token")
-        statsData = await self.client.get_gacha_stats(token)
-        
-        if not statsData or not statsData.get("stats", {}).get("total_count", 0):
+        stats_data = await self.client.get_gacha_stats(token)
+        if not stats_data or not stats_data.get("stats", {}).get("total_count", 0):
             yield event.plain_result("暂无抽卡数据，请先发送【/抽卡分析同步】获取数据。")
             return
             
-        stats = statsData.get("stats", {})
+        stats = stats_data.get("stats", {})
+        analysis_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         
-        # We need to fetch all records to calculate pity for each pool type
-        import datetime
-        now = datetime.datetime.now()
-        analysisTime = now.strftime("%Y-%m-%d %H:%M")
-        
-        charAvatarMap = {}
+        # Prepare icons
+        icon_map = await self._prepare_gacha_icons(token, binding)
         target_avatar = binding.get("avatarUrl", "")
-        try:
-            note_res = await self.client.get_note(token, binding.get("role_id"), binding.get("server_id", 1))
-            if note_res and "base" in note_res and note_res["base"].get("avatarUrl"):
-                target_avatar = note_res["base"]["avatarUrl"]
-            if note_res and "chars" in note_res:
-                for c in note_res.get("chars", []):
-                    name = str(c.get("name", "")).strip()
-                    url = c.get("avatarSqUrl", "") or c.get("avatar_sq_url", "")
-                    if name and url: charAvatarMap[name] = url
-        except Exception:
-            pass
-            
-        pool_chars_data = None
-        try:
-            pool_chars_data = await self.client.get_gacha_pool_chars()
-            if pool_chars_data and "pools" in pool_chars_data:
-                for p in pool_chars_data.get("pools", []):
-                    # Combine character and weapon lists to ensure all icons are captured
-                    item_lists = [
-                        p.get("star6_chars", []), p.get("star5_chars", []), p.get("star4_chars", []),
-                        p.get("star6_weapons", []), p.get("star5_weapons", []), p.get("star4_weapons", [])
-                    ]
-                    for lst in item_lists:
-                        for c in lst:
-                            name = str(c.get("name", "")).strip()
-                            cover = c.get("cover", "") or c.get("cover_url", "")
-                            if name and cover and name not in charAvatarMap:
-                                charAvatarMap[name] = cover
-        except Exception:
-            pass
-            
-        try:
-            # sub_type_id 1 is characters, 2 is weapons
-            tasks = [
-                self.client.get_wiki_items({"main_type_id": "1", "sub_type_id": "1", "page": 1, "page_size": 200}),
-                self.client.get_wiki_items({"main_type_id": "1", "sub_type_id": "2", "page": 1, "page_size": 200})
-            ]
-            wiki_responses = await asyncio.gather(*tasks)
-            for wiki_res in wiki_responses:
-                if wiki_res and "items" in wiki_res:
-                    for it in wiki_res.get("items", []):
-                        brief = it.get("brief") or it
-                        name = str(brief.get("name") or it.get("name") or "").strip()
-                        cover = brief.get("cover") or it.get("cover") or it.get("avatarSqUrl") or ""
-                        if name and cover and name not in charAvatarMap:
-                            charAvatarMap[name] = cover
-        except Exception:
-            pass
-
+        
         render_data = {
-            "title": "抽卡分析",
-            "subtitle": "个人数据",
+            "title": "抽卡分析", "subtitle": "个人数据",
             "totalCount": stats.get("total_count", 0),
-            "star6": stats.get("star6_count", 0),
-            "star5": stats.get("star5_count", 0),
-            "star4": stats.get("star4_count", 0),
-            "userNickname": binding.get('nickname') or "未知",
-            "userUid": binding.get("role_id", ""),
+            "star6": stats.get("star6_count", 0), "star5": stats.get("star5_count", 0), "star4": stats.get("star4_count", 0),
+            "userNickname": binding.get('nickname') or "未知", "userUid": binding.get("role_id", ""),
             "userAvatar": await self.get_b64(target_avatar) if target_avatar else "",
-            "analysisTime": analysisTime,
-            "syncHint": "若需刷新，发送 :抽卡分析同步",
+            "analysisTime": analysis_time, "syncHint": "若需刷新，发送 :抽卡分析同步",
             "pluResPath": "file:///" + os.path.abspath(self.renderer.res_path).replace("\\", "/") + "/",
-            "poolGroups": [],
-            "copyright": "Endfield Plugin | AstrBot"
+            "poolGroups": [], "copyright": "Endfield Plugin | AstrBot"
         }
         
-        # Build UP characters map from pool info
-        pool_up_map = {}
-        try:
-            if pool_chars_data and "pools" in pool_chars_data:
-                for p in pool_chars_data.get("pools", []):
-                    pname = str(p.get("pool_name", "")).strip()
-                    if pname:
-                        ups = [str(c.get("name", "")).strip() for c in p.get("star6_chars", []) if c.get("is_up")]
-                        pool_up_map[pname] = ups
-        except Exception:
-            pass
-
-        pool_types = [
-            {"key": "limited", "label": "限定角色"},
-            {"key": "standard", "label": "常驻角色"}, 
-            {"key": "weapon", "label": "武器池"},
-            {"key": "beginner", "label": "新手池"}
-        ]
+        char_pools, weapon_pools = [], []
+        pool_types = [{"key": "limited", "label": "限定角色"}, {"key": "standard", "label": "常驻角色"}, 
+                      {"key": "weapon", "label": "武器池"}, {"key": "beginner", "label": "新手池"}]
             
-        char_pools = []
-        weapon_pools = []
-        
         for ptype in pool_types:
             key = ptype["key"]
             records_res = await self.client.get_gacha_records(token, pools=key, limit=500)
             records = records_res.get("records", []) if records_res else []
-            
             if not records: continue
             
             # Group by pool_name
             pools_dict = {}
-            free_pools_dict = {}
             for r in records:
-                pool_name = str(r.get("pool_name", "")).strip() or "未知"
-                if r.get("is_free"):
-                    if pool_name not in free_pools_dict:
-                        free_pools_dict[pool_name] = []
-                    free_pools_dict[pool_name].append(r)
-                else:
-                    if pool_name not in pools_dict:
-                        pools_dict[pool_name] = []
-                    pools_dict[pool_name].append(r)
+                pname = str(r.get("pool_name", "")).strip() or "未知"
+                if pname not in pools_dict: pools_dict[pname] = []
+                pools_dict[pname].append(r)
                 
             for pool_name, pool_records in pools_dict.items():
-                # Sort asc to calculate pity
-                pool_records.sort(key=lambda x: str(x.get("seq_id", "")), reverse=False)
-                
-                free_records = free_pools_dict.get(pool_name, [])
-                free_total = len(free_records)
-                
-                total = len(pool_records)
-                star6_count = 0
-                images = []
-                # Pre-collect all 5/6-star icon URLs for this pool
-                all_needed_names = []
-                for r in pool_records:
-                    if r.get("rarity", 0) >= 5:
-                        all_needed_names.append(str(r.get("char_name") or r.get("item_name", "")).strip())
-                for r in free_records:
-                    if r.get("rarity", 0) >= 5:
-                        all_needed_names.append(str(r.get("char_name") or r.get("item_name", "")).strip())
-                
-                # Download icons in parallel
-                urls_to_download = [charAvatarMap.get(name, "") for name in all_needed_names]
-                local_icons = await self.parallel_download_b64(urls_to_download)
-                icon_map = dict(zip(all_needed_names, local_icons))
-
-                images = []
-                pity_since_last = 0
-                max_pity = 40 if key == "weapon" else 80
-                
-                for r in pool_records:
-                    pity_since_last += 1
-                    rarity = r.get("rarity")
-                    if rarity == 6:
-                        star6_count += 1
-                        item_name = str(r.get("char_name") or r.get("item_name", "")).strip()
-                        up_list = pool_up_map.get(pool_name, [])
-                        is_up = item_name in up_list or "UP" in str(r.get("item_name", ""))
-                        
-                        bar_percent = min(100, int((pity_since_last / max_pity) * 100))
-                        
-                        images.append({
-                            "name": item_name,
-                            "pullCount": pity_since_last,
-                            "tag": "UP" if is_up else "歪",
-                            "badgeColor": "up" if is_up else "normal",
-                            "barPercent": bar_percent,
-                            "barColorLevel": "green" if pity_since_last < (max_pity*0.6) else "yellow" if pity_since_last < (max_pity*0.9) else "red",
-                            "url": icon_map.get(item_name, ""),
-                            "fiveStars": [], # Empty list after removing markers
-                            "refLinePercent": None
-                        })
-                        pity_since_last = 0
-                        
-                # Reverse images for display (newest first)
-                images.reverse()
-                
-                # Insert free pulls into images if they hit 6 star
-                for r in free_records:
-                    if r.get("rarity") == 6:
-                        pass_name = str(r.get("char_name") or r.get("item_name", "")).strip()
-                        images.append({
-                            "name": pass_name,
-                            "pullCount": "免费",
-                            "tag": "免费",
-                            "badgeColor": "free",
-                            "barPercent": 100,
-                            "barColorLevel": "green",
-                            "url": icon_map.get(pass_name, ""),
-                            "fiveStars": [],
-                            "refLinePercent": None
-                        })
-                
-                entry = {
-                    "poolName": pool_name,
-                    "total": total + free_total,
-                    "star6": star6_count,
-                    "metric1Label": "平均花费",
-                    "metric1": f"{total // star6_count}抽" if star6_count > 0 else "-",
-                    "metric2Label": "未出红",
-                    "metric2": f"{pity_since_last}抽",
-                    "images": images,
-                    "pitySinceLast6": pity_since_last,
-                    "pityBarPercent": min(100, int((pity_since_last / max_pity) * 100)),
-                    "pityBarColorLevel": "green" if pity_since_last < (max_pity*0.6) else "yellow" if pity_since_last < (max_pity*0.9) else "red",
-                    "pityFiveStars": [],
-                    "freeTotal": free_total,
-                    "inheritedPity": 0,
-                    "inheritedPityPercent": 0,
-                    "freeBarPercent": min(100, int((free_total / 10) * 100)) if free_total > 0 else 0
-                }
-                
-                if key == "weapon":
-                    weapon_pools.append(entry)
-                else:
-                    char_pools.append(entry)
+                entry = await self._prepare_gacha_pool_entry(pool_name, pool_records, key, icon_map)
+                if key == "weapon": weapon_pools.append(entry)
+                else: char_pools.append(entry)
                     
-        # The API already returns records sorted newest first. 
-        # Our initial grouping reversed the elements manually when generating pity.
-        # So we leave the array ordered as-is to let the newest banner top.
-        
-        if char_pools:
-            render_data["poolGroups"].append({"label": "角色池", "pools": char_pools})
-        if weapon_pools:
-            render_data["poolGroups"].append({"label": "武器池", "pools": weapon_pools})
+        if char_pools: render_data["poolGroups"].append({"label": "角色池", "pools": char_pools})
+        if weapon_pools: render_data["poolGroups"].append({"label": "武器池", "pools": weapon_pools})
             
         try:
-            img_url = await self.renderer.render_html("gacha/gacha-analysis.html", render_data)
-            if img_url:
-                yield event.image_result(img_url)
-                return
+            url = await self.renderer.render_html("gacha/gacha-analysis.html", render_data)
+            if url: yield event.image_result(url)
+            else: yield event.plain_result(f"【抽卡分析】总抽数：{render_data['totalCount']}（图片渲染失败）")
         except Exception as e:
-            logger.warning(f"渲染抽卡分析失败，使用文本回退: {e}")
-            
-        yield event.plain_result(f"【抽卡分析】总抽数：{render_data['totalCount']}（图片渲染失败）")
+            logger.error(f"Gacha analysis render failed: {e}")
+            yield event.plain_result(f"【抽卡分析】总抽数：{render_data['totalCount']}（渲染异常）")
+
+    async def _prepare_gacha_pool_entry(self, pool_name: str, records: list, pool_key: str, icon_map: dict) -> dict:
+        """Helper to process records of a specific pool into a render entry."""
+        # Split normal and free records
+        normal = [r for r in records if not r.get("is_free")]
+        free = [r for r in records if r.get("is_free")]
+        
+        # Sort asc to calculate pity
+        normal.sort(key=lambda x: str(x.get("seq_id", "")), reverse=False)
+        
+        images = []
+        pity_count = 0
+        star6_count = 0
+        max_pity = 40 if pool_key == "weapon" else 80
+        
+        # Pity calculation
+        for r in normal:
+            pity_count += 1
+            if int(r.get("rarity", 0)) == 6:
+                star6_count += 1
+                name = str(r.get("char_name") or r.get("item_name", "")).strip()
+                images.append({
+                    "name": name, "pullCount": pity_count,
+                    "tag": "UP" if "UP" in str(r.get("item_name", "")) else "歪",
+                    "badgeColor": "up" if "UP" in str(r.get("item_name", "")) else "normal",
+                    "barPercent": min(100, int((pity_count / max_pity) * 100)),
+                    "barColorLevel": "green" if pity_count < (max_pity*0.6) else "yellow" if pity_count < (max_pity*0.9) else "red",
+                    "url": await self.get_b64(icon_map.get(name, "")),
+                    "fiveStars": [], "refLinePercent": None
+                })
+                pity_count = 0
+        
+        images.reverse() # Newest first
+        
+        for r in free:
+            if int(r.get("rarity", 0)) == 6:
+                name = str(r.get("char_name") or r.get("item_name", "")).strip()
+                images.append({
+                    "name": name, "pullCount": "免费", "tag": "免费", "badgeColor": "free",
+                    "barPercent": 100, "barColorLevel": "green",
+                    "url": await self.get_b64(icon_map.get(name, "")),
+                    "fiveStars": [], "refLinePercent": None
+                })
+
+        return {
+            "poolName": pool_name, "total": len(records), "star6": star6_count,
+            "metric1Label": "平均花费", "metric1": f"{len(normal) // star6_count}抽" if star6_count > 0 else "-",
+            "metric2Label": "未出红", "metric2": f"{pity_count}抽",
+            "images": images, "pitySinceLast6": pity_count,
+            "pityBarPercent": min(100, int((pity_count / max_pity) * 100)),
+            "pityBarColorLevel": "green" if pity_count < (max_pity*0.6) else "yellow" if pity_count < (max_pity*0.9) else "red",
+            "pityFiveStars": [], "freeTotal": len(free), "inheritedPity": 0, "inheritedPityPercent": 0,
+            "freeBarPercent": min(100, int((len(free) / 10) * 100)) if len(free) > 0 else 0
+        }
 
     @filter.command("wiki")
     async def wiki_search(self, event: AstrMessageEvent, name: str):
@@ -1928,166 +1703,269 @@ class EndfieldPlugin(Star):
 
     async def announcement_task(self):
         '''后台公告推送任务'''
+        logger.info("[公告推送] 任务已启动")
         while True:
-            # 动态获取配置项，防止过短
-            poll_interval_mins = int(self.config.get('announcement_poll_interval', 10))
-            poll_interval_secs = max(60, poll_interval_mins * 60)
-            await asyncio.sleep(poll_interval_secs)
+            try:
+                subs = await self.announce_mgr.get_subscriptions()
+                if not subs:
+                    # Wait if no subscriptions
+                    await asyncio.sleep(600)
+                    continue
+                    
+                latest = await self.client.get_announcement_latest()
+                if not latest or "published_at_ts" not in latest:
+                    await asyncio.sleep(600)
+                    continue
+                    
+                ts = int(latest["published_at_ts"])
+                logger.debug(f"[公告推送] 轮询完成，最新公告 TS: {ts}")
 
-            subs = await self.announce_mgr.get_subscriptions()
-            if not subs:
-                continue
-                
-            latest = await self.client.get_announcement_latest()
-            if not latest or "published_at_ts" not in latest:
-                continue
-                
-            ts = int(latest["published_at_ts"])
-
-            for s in subs:
-                if ts > int(s.get("since_ts", 0)):
-                    # Push image instead of plain text if possible
-                    item_id = latest.get("item_id")
-                    item = latest
-                    if item_id:
-                        detail_res = await self.client.get_announcement_detail(str(item_id))
-                        if detail_res: item = {**latest, **detail_res}
-                        
-                    render_data = build_detail_render_data(item)
-                    url = await self.renderer.render_html("announcement/detail.html", render_data)
-                    msg_origin = s.get("msg_origin", "")
-                    if not msg_origin:
-                        logger.warning(f"[公告订阅] 群 {s.get('group_id')} 缺少 msg_origin，跳过推送")
+                for s in subs:
+                    since_ts = int(s.get("since_ts", 0))
+                    if ts > since_ts:
+                        logger.info(f"[公告推送] 发现新公告: {latest.get('title')}，正在推送给 {s.get('group_id')}...")
+                        item_id = latest.get("item_id")
+                        item = latest
+                        if item_id:
+                            detail_res = await self.client.get_announcement_detail(str(item_id))
+                            if detail_res: item = {**latest, **detail_res}
+                            
+                        render_data = build_detail_render_data(item)
+                        url = await self.renderer.render_html("announcement/detail.html", render_data)
+                        msg_origin = s.get("msg_origin", "")
+                        if not msg_origin:
+                            logger.warning(f"[公告订阅] 群 {s.get('group_id')} 缺少 msg_origin，请尝试重新订阅")
+                            continue
+                        try:
+                            chain = MessageChain()
+                            if url:
+                                # Standardize path for Windows
+                                img_path = os.path.normpath(url.replace("file:///", ""))
+                                chain.chain.append(Image.fromFileSystem(img_path))
+                            else:
+                                msg = f"【终末地新公告】\n{latest.get('title')}\n{latest.get('summary') or ''}"
+                                chain.chain.append(Plain(msg))
+                            
+                            await self.context.send_message(msg_origin, chain)
+                            logger.info(f"[公告推送] 公告推送成功: {s.get('group_id')}")
+                        except Exception as e:
+                            logger.error(f"[公告推送] 推送失败 (target={msg_origin}): {e}")
                         await self.announce_mgr.update_since_ts(s["group_id"], ts)
-                        continue
-                    try:
-                        if url:
-                            img_path = url.replace("file:///", "")
-                            await self.context.send_message(msg_origin, [Image.fromFileSystem(img_path)])
-                        else:
-                            msg = f"【终末地新公告】\n{latest.get('title')}\n{latest.get('summary') or ''}"
-                            await self.context.send_message(msg_origin, [Plain(msg)])
-                    except Exception as e:
-                        logger.error(f"Failed to push announcement to {msg_origin}: {e}")
-                    await self.announce_mgr.update_since_ts(s["group_id"], ts)
+                
+                poll_interval_mins = int(self.config.get('announcement_poll_interval', 10))
+                await asyncio.sleep(max(60, poll_interval_mins * 60))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[公告推送] 任务异常: {e}")
+                await asyncio.sleep(60)
 
     async def sanity_task(self):
         '''理智满值通知推送任务（可配置轮询间隔）'''
+        logger.info("[理智推送] 任务已启动")
         while True:
-            poll_interval_mins = int(self.config.get('sanity_poll_interval', 20))
-            poll_interval_secs = max(60, poll_interval_mins * 60)
-            await asyncio.sleep(poll_interval_secs)
-            subs = await self.sanity_mgr.get_subscriptions()
-            if not subs:
-                continue
-
-            now_ts = int(time.time())
-            
-            for sub in subs:
-                user_id = sub.get("user_id")
-                msg_origin = sub.get("msg_origin", "")
-                last_notified = sub.get("last_notified", 0)
-
-                if not msg_origin:
-                    logger.warning(f"[理智订阅] 用户 {user_id} 缺少 msg_origin，指婁 可重新订阅")
+            try:
+                subs = await self.sanity_mgr.get_subscriptions()
+                if not subs:
+                    await asyncio.sleep(600)
                     continue
 
-                # 避免 4 小时内重复推送
-                if now_ts - last_notified < 3600 * 4:
-                    continue
+                now_ts = int(time.time())
+                logger.debug(f"[理智推送] 开始扫描 {len(subs)} 个订阅")
                 
-                binding = await self.user_mgr.get_primary_binding(user_id)
-                if not binding:
-                    continue
+                for sub in subs:
+                    user_id = sub.get("user_id")
+                    msg_origin = sub.get("msg_origin", "")
+                    last_notified = sub.get("last_notified", 0)
+
+                    if not msg_origin:
+                        logger.warning(f"[理智订阅] 用户 {user_id} 缺少 msg_origin，请重新订阅")
+                        continue
+
+                    # Cooldown check (4h default)
+                    if now_ts - last_notified < 3600 * 4:
+                        continue
                     
-                token = binding.get("framework_token")
-                role_id = binding.get("role_id")
-                server_id = binding.get("server_id", 1)
-                
-                if not token or not role_id:
-                    continue
-                
-                try:
-                    stamina_data = await self.client.get_stamina(token, role_id, server_id)
-                    if not stamina_data:
+                    binding = await self.user_mgr.get_primary_binding(user_id)
+                    if not binding:
+                        logger.debug(f"[理智推送] 用户 {user_id} 未找到绑定，跳过")
                         continue
                         
-                    stamina_obj = stamina_data.get("stamina", {})
-                    s_current = int(stamina_obj.get("current", 0) or 0)
-                    s_max = int(stamina_obj.get("max", 0) or 0)
+                    token = binding.get("framework_token")
+                    role_id = binding.get("role_id")
+                    server_id = binding.get("server_id", 1)
                     
-                    if s_current > 0 and s_max > 0 and s_current >= s_max:
-                        try:
-                            nick = binding.get('nickname') or '干员'
-                            msg = f"【理智已满】{nick}，您的理智已达到上限（{s_current}/{s_max}），请及时消耗。"
-                            await self.context.send_message(msg_origin, [At(qq=user_id), Plain(f"\n{msg}")])
-                            await self.sanity_mgr.update_last_notified(user_id, now_ts)
-                        except Exception as e:
-                            logger.error(f"Failed to push sanity notification to {msg_origin}: {e}")
-                except Exception as e:
-                    logger.error(f"Sanity task error for user {user_id}: {e}")
+                    if not token or not role_id:
+                        logger.debug(f"[理智推送] 用户 {user_id} 缺少 Token 或 RoleID，跳过")
+                        continue
                     
-                # 限速
-                await asyncio.sleep(1.5)
+                    try:
+                        stamina_data = await self.client.get_stamina(token, role_id, server_id)
+                        if not stamina_data:
+                            logger.warning(f"[理智推送] 无法获取用户 {user_id} 的理智数据")
+                            continue
+                            
+                        stamina_obj = stamina_data.get("stamina", {})
+                        s_current = int(stamina_obj.get("current", 0) or 0)
+                        s_max = int(stamina_obj.get("max", 0) or 0)
+                        
+                        logger.debug(f"[理智推送] 用户 {user_id}: {s_current}/{s_max}")
+                        
+                        if s_current > 0 and s_max > 0 and s_current >= s_max:
+                            if last_notified != 0:
+                                logger.debug(f"[理智推送] 用户 {user_id} 理智已满但已提醒过，跳过")
+                                continue
+                                
+                            try:
+                                nick = binding.get('nickname') or '干员'
+                                msg = f"【理智已满】{nick}，您的理智已达到上限（{s_current}/{s_max}），请及时消耗。"
+                                logger.info(f"[理智推送] 发现理智已满，正在推送给用户 {user_id}...")
+                                
+                                chain = MessageChain()
+                                chain.chain.append(At(qq=user_id))
+                                chain.chain.append(Plain(f"\n{msg}"))
+                                
+                                await self.context.send_message(msg_origin, chain)
+                                await self.sanity_mgr.update_last_notified(user_id, 1) # Set to non-zero to mark as notified
+                                logger.info(f"[理智推送] 推送成功: {user_id}")
+                            except Exception as e:
+                                logger.error(f"[理智推送] 推送失败 (target={msg_origin}): {e}")
+                        else:
+                            # Sanity not full, reset notification flag if it was set
+                            if last_notified != 0:
+                                logger.info(f"[理智推送] 用户 {user_id} 理智未满 ({s_current}/{s_max})，重置提醒标志")
+                                await self.sanity_mgr.update_last_notified(user_id, 0)
+                    except Exception as e:
+                        logger.error(f"[理智推送] 数据拉取异常 (user={user_id}): {e}")
+                        
+                    await asyncio.sleep(1.5)
+                
+                poll_interval_mins = int(self.config.get('sanity_poll_interval', 20))
+                await asyncio.sleep(max(60, poll_interval_mins * 60))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[理智推送] 任务异常: {e}")
+                await asyncio.sleep(60)
 
     async def auto_sign_in_task(self):
         '''每日自动签到任务'''
         import datetime
         while True:
             try:
-                # Calculate time until next sign-in
+                # 计算下次签到的等待时间
                 now = datetime.datetime.now()
-                target_time_str = self.auto_sign_in_time if hasattr(self, 'auto_sign_in_time') else "00:05"
+                target_time_str = self.auto_sign_in_time
                 try:
                     target_hour, target_minute = map(int, target_time_str.split(':'))
                 except ValueError:
-                    target_hour, target_minute = 0, 5 # Default to 00:05 if format is invalid
+                    target_hour, target_minute = 0, 5 # 如果格式非法，默认 00:05
                 
                 target_time = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
                 if now > target_time:
-                    # If target time for today has passed, schedule for tomorrow
+                    # 如果今天的目标时间已过，则安排在明天
                     target_time += datetime.timedelta(days=1)
                 
                 wait_seconds = (target_time - now).total_seconds()
                 logger.info(f"[Endfield Auto Sign-In] Next auto sign-in scheduled at {target_time.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_seconds:.1f} seconds)")
                 
-                # Sleep until target time
+                # 睡眠直到目标时间
                 await asyncio.sleep(wait_seconds)
                 
-                # Wake up and sign in for all bound accounts
-                all_bindings = await self.user_mgr.get_all_bindings()
-                success_count = 0
-                fail_count = 0
-                
-                for bind in all_bindings:
-                    token = bind.get("framework_token")
-                    role_id = bind.get("role_id")
-                    if not token or not role_id:
-                        continue
-                        
-                    try:
-                        res = await self.client.get_attendance(token)
-                        if res and isinstance(res, dict):
-                            success_count += 1
-                            logger.info(f"[Endfield Auto Sign-In] Success for role {role_id}")
-                        else:
-                            fail_count += 1
-                            logger.warning(f"[Endfield Auto Sign-In] Failed format for role {role_id}: {res}")
-                    except Exception as e:
-                        fail_count += 1
-                        logger.error(f"[Endfield Auto Sign-In] Error for role {role_id}: {e}")
-                    
-                    # Small delay between requests to avoid rate limits
-                    await asyncio.sleep(1.5)
-                    
-                logger.info(f"[Endfield Auto Sign-In] Batch complete. Success: {success_count}, Failed/Skipped: {fail_count}")
+                # 执行批量签到
+                await self.run_batch_sign_in()
                 
             except asyncio.CancelledError:
                 logger.info("[Endfield Auto Sign-In] Task cancelled.")
                 break
             except Exception as e:
                 logger.error(f"[Endfield Auto Sign-In] Unexpected error in task loop: {e}")
-                await asyncio.sleep(60) # Sleep before retry on error to prevent hot-loop
+                await asyncio.sleep(60) # 出错后延迟重试，防止死循环
+
+    async def run_batch_sign_in(self):
+        '''执行所有账号的自动签到'''
+        import datetime
+        logger.info("[Endfield Auto Sign-In] Starting batch sign-in...")
+        
+        all_bindings = await self.user_mgr.get_all_bindings()
+        user_ids_seen = set()
+        account_count = 0
+        success_count = 0
+        fail_count = 0
+        
+        for bind in all_bindings:
+            token = bind.get("framework_token")
+            role_id = bind.get("role_id")
+            user_id = bind.get("_user_id")
+            if not token or not role_id:
+                continue
+            
+            user_ids_seen.add(user_id)
+            account_count += 1
+                
+            try:
+                res = await self.client.get_attendance(token)
+                # 签到成功或重复签到
+                if res and isinstance(res, dict):
+                    success_count += 1
+                    logger.info(f"[Endfield Auto Sign-In] Success for role {role_id}")
+                else:
+                    fail_count += 1
+                    logger.warning(f"[Endfield Auto Sign-In] Failed/Error for role {role_id}: {res}")
+            except Exception as e:
+                fail_count += 1
+                logger.error(f"[Endfield Auto Sign-In] Exception for role {role_id}: {e}")
+            
+            # 使用可配置的间隔
+            await asyncio.sleep(max(0.1, self.auto_sign_in_interval))
+            
+        logger.info(f"[Endfield Auto Sign-In] Batch complete. Users: {len(user_ids_seen)}, Accounts: {account_count}, Success: {success_count}, Failed: {fail_count}")
+        
+        # Update last sign date
+        now_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        await self.sign_mgr.set_last_sign_date(now_date)
+        
+        # 推送通知汇总
+        if self.auto_sign_in_notify_group:
+            target = self.auto_sign_in_notify_group
+            # 如果不是统一 ID（不含 :），尝试通过现有订阅推断平台信息
+            if ":" not in target:
+                found_origin = ""
+                # 优先尝试公告订阅
+                ann_subs = await self.announce_mgr.get_subscriptions()
+                for s in ann_subs:
+                    if s.get("msg_origin") and ":" in s["msg_origin"]:
+                        parts = s["msg_origin"].split(":")
+                        if len(parts) >= 3:
+                            # 使用相同的平台和类型（通常是群聊）
+                            found_origin = f"{parts[0]}:{parts[1]}:{target}"
+                            break
+                if not found_origin:
+                    # 尝试理智订阅
+                    san_subs = await self.sanity_mgr.get_subscriptions()
+                    for s in san_subs:
+                        if s.get("msg_origin") and ":" in s["msg_origin"]:
+                            parts = s["msg_origin"].split(":")
+                            if len(parts) >= 3:
+                                found_origin = f"{parts[0]}:{parts[1]}:{target}"
+                                break
+                if found_origin:
+                    target = found_origin
+                    logger.info(f"[Endfield Auto Sign-In] Resolved plain ID to unified ID: {target}")
+
+            msg = (
+                "森空岛自动签到已执行\n"
+                f"用户数：{len(user_ids_seen)}\n"
+                f"账号数：{account_count}\n"
+                f"成功数：{success_count}\n"
+                f"失败数：{fail_count}"
+            )
+            try:
+                await self.context.send_message(target, MessageChain([Plain(msg)]))
+            except Exception as e:
+                logger.error(f"[Endfield Auto Sign-In] Failed to send notification (target={target}): {e}")
+                if ":" not in str(target):
+                    logger.warning("[Endfield Auto Sign-In] Tip: Please provide the full Unified ID in settings, e.g., 'aiocqhttp:group:123456'")
 
     @filter.command("帝江号建设", alias=["帝江号"])
     async def spaceship_cmd(self, event: AstrMessageEvent):
@@ -2243,6 +2121,211 @@ class EndfieldPlugin(Star):
         else:
             yield event.plain_result("渲染地区建设图片失败。")
 
+
+    def _prepare_operator_render_data(self, full_res: dict, panel_stats: dict, binding: dict, matched: dict) -> dict:
+        """将原始 API 数据解析为模板友好的渲染数据。"""
+        detail = (full_res.get("data") or {}).get("detail") or full_res.get("detail") or full_res
+        char_data = detail.get("charData") or {}
+        user_skills = detail.get("userSkills") or {}
+        
+        def _parse_rarity(raw):
+            val = raw.get("value", 1) if isinstance(raw, dict) else raw
+            try: return max(1, min(6, int(val)))
+            except: return 1
+
+        rarity = _parse_rarity(char_data.get("rarity", {}))
+        potential_level = min(5, max(0, int(detail.get("potentialLevel", 0) or 0)))
+        
+        def _get_val(obj, key="name", default=""):
+            if not obj: return default
+            if isinstance(obj, dict): return obj.get(key) or default
+            return str(obj)
+
+        _skill_type_map = {
+            "skill_type_normal_attack": "普通攻击",
+            "skill_type_normal_skill": "战技",
+            "skill_type_combo_skill": "连携技",
+            "skill_type_ultimate_skill": "终结技",
+        }
+        
+        skills = []
+        for s in (char_data.get("skills") or []):
+            if not isinstance(s, dict): continue
+            u = (user_skills.get(s.get("id", "")) or {}) if isinstance(user_skills, dict) else {}
+            sk_type = s.get("type")
+            sk_key = sk_type.get("key", "") if isinstance(sk_type, dict) else str(sk_type or "")
+            skills.append({
+                "name": s.get("name", "未知"), 
+                "iconUrl": s.get("iconUrl", ""),
+                "level": u.get("level", 1) if isinstance(u, dict) else 1, 
+                "maxLevel": u.get("maxLevel", "") if isinstance(u, dict) else "",
+                "typeLabel": _skill_type_map.get(sk_key, "") or _get_val(sk_type), 
+                "typeKey": sk_key,
+            })
+        while len(skills) < 4: skills.append({"empty": True})
+
+        def _pick_equip(raw):
+            if not raw or not isinstance(raw, dict): return None
+            # e 是核心数据对象（名称、图标等）
+            e = raw.get("equipData") or raw.get("weaponData") or raw.get("tacticalItemData") or raw
+            
+            if not e or not isinstance(e, dict) or not e.get("name"): return None
+            
+            r = _parse_rarity(e.get("rarity", {}))
+            # 等级通常在 raw 中（武器/装备），或在某些结构的 e 中
+            lv_raw = raw.get("level") if "level" in raw else e.get("level")
+            lv = lv_raw.get("value") if isinstance(lv_raw, dict) else lv_raw
+            
+            # 套装信息可能在 raw 或 e 中
+            suit_data = raw.get("equipSuitData") or raw.get("suit") or e.get("equipSuitData") or e.get("suit")
+            suit_name = ""
+            if isinstance(suit_data, dict):
+                suit_name = suit_data.get("name", "")
+            
+            # 武器新增字段
+            breakthrough = raw.get("breakthroughLevel")
+            refine = raw.get("refineLevel")
+            if refine is not None: refine += 1 # 从 0 索引转换为 1 索引
+
+            passive_skills = []
+            raw_skills = e.get("skills") # 通常在 weaponData (e) 中
+            if isinstance(raw_skills, list):
+                for s in raw_skills:
+                    if isinstance(s, dict) and s.get("value"):
+                        passive_skills.append(s["value"])
+            
+            return {
+                "name": e.get("name", ""), 
+                "iconUrl": e.get("iconUrl", ""), 
+                "level": lv or 1, 
+                "stars": list(range(1, r+1)),
+                "suitName": suit_name,
+                "suitCount": 1,
+                "breakthroughLevel": breakthrough,
+                "refineLevel": refine,
+                "passiveSkills": passive_skills
+            }
+
+        weapon = _pick_equip(detail.get("weapon"))
+        body_equip = _pick_equip(detail.get("bodyEquip"))
+        arm_equip = _pick_equip(detail.get("armEquip"))
+        first_accessory = _pick_equip(detail.get("firstAccessory"))
+        second_accessory = _pick_equip(detail.get("secondAccessory"))
+        
+        # 统计所有护甲和配件的套装件数
+        equips = [body_equip, arm_equip, first_accessory, second_accessory]
+        suit_counts = {}
+        for e in equips:
+            if e and e.get("suitName"):
+                sn = e["suitName"]
+                suit_counts[sn] = suit_counts.get(sn, 0) + 1
+        for e in equips:
+            if e and e.get("suitName"):
+                e["suitCount"] = suit_counts[e["suitName"]]
+
+        tactical_raw = detail.get("tacticalItem")
+        tactical_item = None
+        if tactical_raw and isinstance(tactical_raw, dict):
+            t = tactical_raw.get("tacticalItemData") or tactical_raw
+            if isinstance(t, dict) and t.get("name"):
+                tactical_item = {
+                    "name": t.get("name", ""),
+                    "iconUrl": t.get("iconUrl", ""),
+                    "activeEffect": t.get("activeEffect", "")
+                }
+
+        # Handle illustration: fallback across multiple common keys
+        illustration_url = char_data.get("illustrationUrl") or char_data.get("fullAvatarUrl") or \
+                           matched.get("illustrationUrl") or matched.get("fullAvatarUrl") or ""
+
+        tags_list = []
+        for t in (char_data.get("tags") or []):
+            if isinstance(t, dict):
+                n = t.get("name")
+                if n: tags_list.append(n)
+            elif isinstance(t, str):
+                tags_list.append(t)
+
+        return {
+            "name": char_data.get("name", "未知"),
+            "level": detail.get("level", 1),
+            "rarity": rarity,
+            "stars": list(range(1, rarity + 1)),
+            "potentialLevel": potential_level,
+            "potentialStars": [{"active": i < potential_level, "index": i + 1} for i in range(5)],
+            "evolvePhase": int(detail.get("evolvePhase", 0) or 0),
+            "displaySkills": skills[:4],
+            "weapon": weapon,
+            "bodyEquip": body_equip,
+            "armEquip": arm_equip,
+            "firstAccessory": first_accessory,
+            "secondAccessory": second_accessory,
+            "tacticalItem": tactical_item,
+            "illustrationUrl": illustration_url,
+            "userAvatar": binding.get("avatarUrl", "") if isinstance(binding, dict) else "",
+            "userNickname": (binding.get("nickname") if isinstance(binding, dict) else None) or "干员",
+            "userLevel": binding.get("level", 1) if isinstance(binding, dict) else 1,
+            "profession": _get_val(char_data.get("profession")),
+            "property": _get_val(char_data.get("property")),
+            "weaponTypeName": _get_val(char_data.get("weaponType")),
+            "tagsList": tags_list,
+            "panelStats": panel_stats,
+            "copyright": "Endfield Plugin | AstrBot",
+            "pluResPath": "file:///" + os.path.abspath(self.renderer.res_path).replace("\\", "/") + "/"
+        }
+
+    async def _prepare_gacha_icons(self, token: str, binding: dict) -> dict:
+        """Fetch and aggregate icons for characters and weapons from multiple sources."""
+        icon_map = {}
+        # 1. From note
+        try:
+            note = await self.client.get_note(token, binding.get("role_id"), int(binding.get("server_id", 1)))
+            if note and "chars" in note:
+                for c in note["chars"]:
+                    name = str(c.get("name", "")).strip()
+                    url = c.get("avatarSqUrl", "") or c.get("avatar_sq_url", "")
+                    if name and url: icon_map[name] = url
+        except: pass
+        
+        # 2. From pool info
+        try:
+            pools = await self.client.get_gacha_pool_chars()
+            if pools and "pools" in pools:
+                for p in pools["pools"]:
+                    for lst in [p.get("star6_chars", []), p.get("star5_chars", []), p.get("star4_chars", []),
+                               p.get("star6_weapons", []), p.get("star5_weapons", []), p.get("star4_weapons", [])]:
+                        for it in lst:
+                            name = str(it.get("name", "")).strip()
+                            url = it.get("cover", "") or it.get("cover_url", "")
+                            if name and url: icon_map[name] = url
+        except: pass
+
+        # 3. From Wiki (fallback)
+        try:
+            for stid in ["1", "2"]:
+                res = await self.client.get_wiki_items({"main_type_id": "1", "sub_type_id": stid, "page": 1, "page_size": 200})
+                if res and "items" in res:
+                    for it in res["items"]:
+                        brief = it.get("brief") or it
+                        name = str(brief.get("name") or "").strip()
+                        url = brief.get("cover") or it.get("cover") or it.get("avatarSqUrl") or ""
+                        if name and url and name not in icon_map: icon_map[name] = url
+        except: pass
+        return icon_map
+
+    def _calculate_gacha_pity(self, records: list) -> dict:
+        """Analyze records to calculate pity counts for each pool type."""
+        pity = {"limited": 0, "standard": 0, "weapon": 0, "beginner": 0}
+        # Records are newest first. Scan until 6-star for each pool type.
+        pools_done = set()
+        for r in records:
+            ptype = r.get("pool_type")
+            if ptype in pity and ptype not in pools_done:
+                if int(r.get("rarity", 0)) >= 6:
+                    pools_done.add(ptype)
+                else:
+                    pity[ptype] += 1
+        return pity
 
     async def terminate(self):
         if self._announcement_task_handle:
