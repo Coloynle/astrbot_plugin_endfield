@@ -209,7 +209,7 @@ html, body {
 .up-bar-char { background: #dc2626; }
 .up-bar-weapon { background: #d97706; }
 
-/* ========== 官服/B服 ========== */
+/* ========== 官服/B 服 ========== */
 .channel-row {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -253,7 +253,7 @@ html, body {
 
 .ch-red { color: #dc2626; }
 
-/* ========== 卡池网格：2列 + 全宽 ========== */
+/* ========== 卡池网格：2 列 + 全宽 ========== */
 .pool-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
