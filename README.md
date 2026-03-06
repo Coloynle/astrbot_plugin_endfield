@@ -54,7 +54,7 @@
 
 ```bash
 cd AstrBot/data/plugins
-git clone https://github.com/bvzrays/astrbot_plugin_endfield.git
+git clone https://github.com/Entropy-Increase-Team/astrbot_plugin_endfield.git
 ```
 
 ### 环境依赖
@@ -286,6 +286,7 @@ astrbot_plugin_endfield/
 [⬆ 返回顶部](#-astrbot_plugin_endfield)
 
 </div>
+
 
 
 
