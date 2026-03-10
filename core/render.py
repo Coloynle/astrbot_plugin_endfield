@@ -186,7 +186,7 @@ class Renderer:
                 box = await el.bounding_box() if el else None
                 if box:
                     await page.set_viewport_size({"width": int(box["width"]) + 2, "height": int(box["height"]) + 2})
-                    await page.screenshot(path=output_path, clip=box)
+                    await page.screenshot(path=output_path, clip=box, type="jpeg")
                 else:
                     await page.screenshot(path=output_path, full_page=True)
                 if el: await el.dispose()
